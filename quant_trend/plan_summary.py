@@ -2,7 +2,9 @@ import json
 import os
 import re
 import ssl
+import time
 from datetime import datetime, timezone
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -325,18 +327,33 @@ def _extract_openai_usage(payload: dict) -> dict:
     }
 
 
+def _openai_json_request(request: Request, timeout: float, context: ssl.SSLContext) -> dict:
+    retry_delays = [float(item) for item in os.getenv("OPENAI_RETRY_429_SECONDS", "20,60").split(",") if item.strip()]
+    attempts = len(retry_delays) + 1
+    for attempt in range(attempts):
+        try:
+            with urlopen(request, timeout=timeout, context=context) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:2000]
+            if exc.code == 429 and attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
+            raise RuntimeError(f"OpenAI HTTP {exc.code}: {body or exc.reason}") from exc
+
+
 def _combine_usage(items: list[dict | None]) -> dict:
     keys = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
     return {key: sum(int((item or {}).get(key) or 0) for item in items) for key in keys}
 
 
-def _call_openai_summary(compact: dict, *, effort_override: str | None = None) -> dict | None:
+def _call_openai_summary(compact: dict, *, effort_override: str | None = None, format_retry: bool = False) -> dict | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
     model = os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
     timeout = float(os.getenv("OPENAI_SUMMARY_TIMEOUT_SECONDS", "90"))
-    max_output_tokens = int(os.getenv("OPENAI_SUMMARY_MAX_OUTPUT_TOKENS", "5000"))
+    max_output_tokens = int(os.getenv("OPENAI_SUMMARY_MAX_OUTPUT_TOKENS", "8000"))
     system = (
         "你是美股半导体仓位管理助手。只做中文摘要，不给投资保证。"
         "必须基于输入数据，每只股票一段话；必须覆盖输入positions里的全部symbol。"
@@ -348,10 +365,17 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None) -
         "凡写到量价分、日内分、趋势分、市场分或任何评分，必须优先复制输入里的 *_score_text；"
         "必须使用“分数 / 下限~上限 · 尺位xx%”格式；"
         "禁止写成 8.9/20、3/8、1.4/6、-2/5、0.7/1.5 这类分母式格式。"
+        "注意：杠杆、价格、股数和金额不是评分，不要写成 1.65/2.00 这类斜杠格式。"
         "例如“量价 +2 / -6~+6 · 尺位67%”。"
         "每段说清：现价、动作、关键点位、如有挂单则给方向/股数/价格。"
         "仓位/杠杆/保证金和用户约束要纳入判断。宏观、研报、IPO、流动性等若只是手动覆盖或数据不足，只能作为辅助风险提示，不要写成确定事实。"
     )
+    if format_retry:
+        system += (
+            "这是一次格式修复重试：上一版因为出现分母式评分被拒。"
+            "本次凡评分必须逐字复制输入里的 *_score_text；其他数字不要使用斜杠连接。"
+            "不要写 2/6、8.9/10、1.65/2.00、49825/70374。"
+        )
     body = _apply_gpt5_options({
         "model": model,
         "input": [
@@ -371,8 +395,7 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None) -
         method="POST",
     )
     context = _openai_ssl_context()
-    with urlopen(request, timeout=timeout, context=context) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = _openai_json_request(request, timeout, context)
     text = _extract_openai_text(payload)
     usage = _extract_openai_usage(payload)
     if not text:
@@ -421,10 +444,28 @@ def build_executive_summary(plan: dict) -> dict:
             fallback["usage"] = usage
         return fallback
     if _has_denominator_score_format(text):
-        fallback["error"] = "LLM summary used denominator-style score formatting; local formatted fallback was used."
-        fallback["model"] = model
-        fallback["usage"] = usage
-        return fallback
+        try:
+            retry = _call_openai_summary(compact, format_retry=True)
+        except Exception as exc:
+            retry = {"error": str(exc), "text": "", "usage": None, "model": model}
+        if retry:
+            attempts.append(retry)
+            combined_usage = _combine_usage([item.get("usage") for item in attempts if isinstance(item, dict)])
+            retry_text = str(retry.get("text") or "") if isinstance(retry, dict) else str(retry or "")
+            if retry_text and not _has_denominator_score_format(retry_text):
+                text = retry_text
+                usage = combined_usage
+                model = retry.get("model") if isinstance(retry, dict) else model
+            else:
+                return {
+                    "asof": datetime.now(timezone.utc).isoformat(),
+                    "source": "llm_format_warning",
+                    "model": model,
+                    "usage": combined_usage,
+                    "error": "LLM summary used denominator-style score formatting; raw LLM text was kept instead of local fallback.",
+                    "text": _clip_paragraphs(text),
+                    "paragraphs": [{"symbol": item.get("symbol"), "text": ""} for item in compact.get("positions", [])],
+                }
     text, source = _ensure_symbol_coverage(text, fallback, compact)
     return {
         "asof": datetime.now(timezone.utc).isoformat(),

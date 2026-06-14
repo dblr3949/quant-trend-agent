@@ -82,7 +82,7 @@ class PlanSummaryTests(unittest.TestCase):
             else:
                 os.environ["OPENAI_API_KEY"] = old_key
 
-    def test_llm_summary_with_denominator_scores_uses_fallback(self):
+    def test_llm_summary_with_denominator_scores_retries_then_keeps_llm_warning(self):
         old_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "test-openai-key"
         try:
@@ -104,12 +104,30 @@ class PlanSummaryTests(unittest.TestCase):
                 ],
             }
 
-            with patch("quant_trend.plan_summary._call_openai_summary", return_value="MU：量价评分2/6（分位67%）。"):
+            with patch(
+                "quant_trend.plan_summary._call_openai_summary",
+                side_effect=[
+                    {
+                        "model": "gpt-5.5",
+                        "text": "MU：量价评分2/6（分位67%）。",
+                        "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5, "reasoning_tokens": 1, "total_tokens": 15},
+                        "effort": "medium",
+                    },
+                    {
+                        "model": "gpt-5.5",
+                        "text": "MU：量价评分仍是2/6。",
+                        "usage": {"input_tokens": 11, "cached_input_tokens": 0, "output_tokens": 5, "reasoning_tokens": 1, "total_tokens": 16},
+                        "effort": "medium",
+                    },
+                ],
+            ) as mocked:
                 summary = build_executive_summary(plan)
 
-            self.assertEqual(summary["source"], "local_fallback")
-            self.assertIn("-6~+6", summary["text"])
-            self.assertNotIn("2/6", summary["text"])
+            self.assertEqual(mocked.call_count, 2)
+            self.assertEqual(summary["source"], "llm_format_warning")
+            self.assertIn("2/6", summary["text"])
+            self.assertEqual(summary["usage"]["input_tokens"], 21)
+            self.assertIn("format", summary["error"])
         finally:
             if old_key is None:
                 os.environ.pop("OPENAI_API_KEY", None)

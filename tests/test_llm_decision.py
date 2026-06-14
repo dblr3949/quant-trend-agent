@@ -12,6 +12,17 @@ class LlmDecisionTests(unittest.TestCase):
         self.assertEqual(body["reasoning"]["effort"], "medium")
         self.assertEqual(body["text"]["verbosity"], "low")
 
+    def test_gpt5_decision_request_preserves_structured_output_format(self):
+        body = _apply_gpt5_options(
+            {"model": "gpt-5.5", "text": {"format": {"type": "json_schema", "name": "x", "schema": {}}}},
+            "DECISION",
+            "medium",
+            "low",
+        )
+
+        self.assertEqual(body["text"]["format"]["type"], "json_schema")
+        self.assertEqual(body["text"]["verbosity"], "low")
+
     def test_prompt_context_is_sent_to_decision_llm(self):
         plan = {
             "portfolio": {"current_gross_exposure": 1.6},
@@ -58,6 +69,40 @@ class LlmDecisionTests(unittest.TestCase):
         self.assertTrue(captured["prompt_overlay"]["symbols"]["INTC"]["soft_no_add"])
         self.assertIn("必须读取 prompt", captured["instructions"])
         self.assertEqual(captured["decision_context"][0]["status"], "本轮有输入")
+
+    def test_llm_decision_parse_error_is_reported_with_preview(self):
+        plan = {
+            "portfolio": {},
+            "positions": [{"symbol": "MU", "shares": 100}],
+            "orders": [
+                {
+                    "symbol": "MU",
+                    "side": "buy",
+                    "shares": 10,
+                    "limit_price": 95.0,
+                    "notional": 950.0,
+                    "target_trade_value": 1000.0,
+                    "limit_context": {"reference_price": 100.0, "candidate_levels": []},
+                }
+            ],
+        }
+
+        with patch(
+            "quant_trend.llm_decision._call_openai_decisions",
+            return_value={
+                "_openai_model": "gpt-5.5",
+                "_openai_usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 2, "reasoning_tokens": 0, "total_tokens": 3},
+                "_openai_error": "json_parse_error:bad json",
+                "_openai_raw_preview": "{\"decisions\":[",
+                "decisions": [],
+            },
+        ):
+            result = apply_llm_limit_decisions(plan)
+
+        self.assertEqual(result["source"], "llm_error")
+        self.assertIn("json_parse_error", result["error"])
+        self.assertIn("decisions", result["raw_preview"])
+        self.assertEqual(result["usage"]["total_tokens"], 3)
 
     def test_llm_decision_can_only_apply_known_candidate(self):
         plan = {

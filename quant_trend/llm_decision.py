@@ -2,7 +2,9 @@ import json
 import os
 import re
 import ssl
+import time
 from datetime import datetime, timezone
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -184,7 +186,8 @@ def _apply_gpt5_options(body: dict, kind: str, default_effort: str, default_verb
     verbosity = os.getenv(f"OPENAI_{kind}_VERBOSITY") or os.getenv("OPENAI_VERBOSITY") or default_verbosity
     body.pop("temperature", None)
     body["reasoning"] = {"effort": effort}
-    body["text"] = {"verbosity": verbosity}
+    text_options = body.get("text") if isinstance(body.get("text"), dict) else {}
+    body["text"] = {**text_options, "verbosity": verbosity}
     return body
 
 
@@ -199,6 +202,21 @@ def _extract_openai_usage(payload: dict) -> dict:
         "reasoning_tokens": int(output_details.get("reasoning_tokens") or 0),
         "total_tokens": int(usage.get("total_tokens") or 0),
     }
+
+
+def _openai_json_request(request: Request, timeout: float, context: ssl.SSLContext) -> dict:
+    retry_delays = [float(item) for item in os.getenv("OPENAI_RETRY_429_SECONDS", "20,60").split(",") if item.strip()]
+    attempts = len(retry_delays) + 1
+    for attempt in range(attempts):
+        try:
+            with urlopen(request, timeout=timeout, context=context) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:2000]
+            if exc.code == 429 and attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
+            raise RuntimeError(f"OpenAI HTTP {exc.code}: {body or exc.reason}") from exc
 
 
 def _call_openai_decisions(compact: dict) -> dict | None:
@@ -223,6 +241,44 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         "{\"decisions\":[{\"order_id\":\"rebalance:MU:buy\",\"symbol\":\"MU\",\"side\":\"buy\",\"candidate_id\":\"C1\",\"target_shares\":8,\"rationale\":\"中文理由，60字内\","
         "\"reference_ladder\":[{\"label\":\"第一档\",\"price\":92.5,\"allocation_pct\":0.4,\"rationale\":\"中文理由\"}]}]}"
     )
+    decision_schema = {
+        "type": "object",
+        "properties": {
+            "decisions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "order_id": {"type": "string"},
+                        "symbol": {"type": "string"},
+                        "side": {"type": "string", "enum": ["buy", "sell"]},
+                        "candidate_id": {"type": ["string", "null"]},
+                        "target_shares": {"type": ["integer", "null"]},
+                        "rationale": {"type": "string"},
+                        "reference_ladder": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "price": {"type": "number"},
+                                    "allocation_pct": {"type": "number"},
+                                    "rationale": {"type": "string"},
+                                },
+                                "required": ["label", "price", "allocation_pct", "rationale"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["order_id", "symbol", "side", "candidate_id", "target_shares", "rationale", "reference_ladder"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["decisions"],
+        "additionalProperties": False,
+    }
+    max_output_tokens = int(os.getenv("OPENAI_DECISION_MAX_OUTPUT_TOKENS", "12000"))
     body = _apply_gpt5_options({
         "model": model,
         "input": [
@@ -230,7 +286,15 @@ def _call_openai_decisions(compact: dict) -> dict | None:
             {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
         ],
         "temperature": 0.1,
-        "max_output_tokens": 4096,
+        "max_output_tokens": max_output_tokens,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "limit_decisions",
+                "schema": decision_schema,
+                "strict": True,
+            }
+        },
     }, "DECISION", "medium", "low")
     request = Request(
         "https://api.openai.com/v1/responses",
@@ -242,8 +306,7 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         method="POST",
     )
     timeout = float(os.getenv("OPENAI_DECISION_TIMEOUT_SECONDS", "120"))
-    with urlopen(request, timeout=timeout, context=_openai_ssl_context()) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = _openai_json_request(request, timeout, _openai_ssl_context())
     text = str(payload.get("output_text") or "")
     if not text:
         chunks = []
@@ -259,9 +322,27 @@ def _call_openai_decisions(compact: dict) -> dict | None:
             "_openai_error": "empty_output",
             "decisions": [],
         }
-    parsed = _extract_json(text)
+    usage = _extract_openai_usage(payload)
+    if payload.get("status") == "incomplete":
+        return {
+            "_openai_model": model,
+            "_openai_usage": usage,
+            "_openai_error": f"incomplete:{(payload.get('incomplete_details') or {}).get('reason')}",
+            "_openai_raw_preview": text[:1200],
+            "decisions": [],
+        }
+    try:
+        parsed = _extract_json(text)
+    except Exception as exc:
+        return {
+            "_openai_model": model,
+            "_openai_usage": usage,
+            "_openai_error": f"json_parse_error:{exc}",
+            "_openai_raw_preview": text[:1200],
+            "decisions": [],
+        }
     parsed["_openai_model"] = model
-    parsed["_openai_usage"] = _extract_openai_usage(payload)
+    parsed["_openai_usage"] = usage
     return parsed
 
 
@@ -426,6 +507,7 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
     usage = payload.pop("_openai_usage", None) if isinstance(payload, dict) else None
     model = payload.pop("_openai_model", None) if isinstance(payload, dict) else None
     error = payload.pop("_openai_error", None) if isinstance(payload, dict) else None
+    raw_preview = payload.pop("_openai_raw_preview", None) if isinstance(payload, dict) else None
     decisions = payload.get("decisions") if isinstance(payload, dict) else None
     if not isinstance(decisions, list):
         return {
@@ -436,12 +518,14 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
             "applied": [],
         }
     if error and not decisions:
+        source = "llm_empty_output" if error == "empty_output" else "llm_error"
         return {
             "asof": datetime.now(timezone.utc).isoformat(),
-            "source": "llm_empty_output",
+            "source": source,
             "model": model,
             "usage": usage,
             "error": error,
+            "raw_preview": raw_preview,
             "applied": [],
         }
 

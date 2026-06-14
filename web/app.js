@@ -1362,15 +1362,33 @@ function renderExecutiveSummary(summary) {
   }
   target.classList.remove("muted");
   target.innerHTML = parseSummaryBlocks(summary.text).map((block, index) => renderSummaryBlock(block, index)).join("");
-  source.textContent = String(summary.source || "").startsWith("llm") ? "LLM" : "本地兜底";
+  const sourceName = String(summary.source || "");
+  const errorText = String(summary.error || "");
+  const errorLabel = compactLlmError(errorText);
+  source.textContent = sourceName.startsWith("llm") ? "LLM" : "本地兜底";
   if (summary.source === "llm_with_local_fill") {
     source.textContent = "LLM+补齐";
+  } else if (summary.source === "llm_format_warning") {
+    source.textContent = "LLM·格式警告";
+  } else if (errorLabel) {
+    source.textContent = `${source.textContent} · ${errorLabel}`;
   }
-  if (summary.error) {
-    source.title = `LLM 调用失败，已使用本地兜底：${summary.error}`;
+  if (errorText) {
+    source.title = `${sourceName.startsWith("llm") ? "LLM 摘要有警告" : "LLM 调用失败，已使用本地兜底"}：${errorText}`;
   } else {
     source.removeAttribute("title");
   }
+}
+
+function compactLlmError(error) {
+  const text = String(error || "");
+  if (!text) return "";
+  if (text.includes("insufficient_quota")) return "API额度不足";
+  if (text.includes("Too Many Requests") || text.includes("HTTP 429")) return "请求限流";
+  if (text.includes("json_parse_error")) return "JSON解析失败";
+  if (text.includes("incomplete") || text.includes("max_output")) return "输出截断";
+  if (text.includes("denominator-style") || text.includes("format")) return "格式警告";
+  return "LLM异常";
 }
 
 function fallbackExecutiveSummary(plan) {
