@@ -349,7 +349,7 @@ def _call_openai_summary(compact: dict) -> dict | None:
         ],
         "temperature": 0.2,
         "max_output_tokens": 2200,
-    }, "SUMMARY", "medium", "medium")
+    }, "SUMMARY", "low", "medium")
     request = Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(body).encode("utf-8"),
