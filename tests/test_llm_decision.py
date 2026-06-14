@@ -1,10 +1,17 @@
 import unittest
 from unittest.mock import patch
 
-from quant_trend.llm_decision import apply_llm_limit_decisions
+from quant_trend.llm_decision import _apply_gpt5_options, apply_llm_limit_decisions
 
 
 class LlmDecisionTests(unittest.TestCase):
+    def test_gpt5_decision_request_uses_xhigh_reasoning(self):
+        body = _apply_gpt5_options({"model": "gpt-5.5", "temperature": 0.1}, "DECISION", "xhigh", "low")
+
+        self.assertNotIn("temperature", body)
+        self.assertEqual(body["reasoning"]["effort"], "xhigh")
+        self.assertEqual(body["text"]["verbosity"], "low")
+
     def test_prompt_context_is_sent_to_decision_llm(self):
         plan = {
             "portfolio": {"current_gross_exposure": 1.6},

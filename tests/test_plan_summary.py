@@ -2,10 +2,17 @@ import os
 import unittest
 from unittest.mock import patch
 
-from quant_trend.plan_summary import build_executive_summary
+from quant_trend.plan_summary import _apply_gpt5_options, build_executive_summary
 
 
 class PlanSummaryTests(unittest.TestCase):
+    def test_gpt5_summary_request_uses_medium_reasoning(self):
+        body = _apply_gpt5_options({"model": "gpt-5.5", "temperature": 0.2}, "SUMMARY", "medium", "medium")
+
+        self.assertNotIn("temperature", body)
+        self.assertEqual(body["reasoning"]["effort"], "medium")
+        self.assertEqual(body["text"]["verbosity"], "medium")
+
     def test_fallback_summary_is_short_and_per_symbol(self):
         old_key = os.environ.pop("OPENAI_API_KEY", None)
         try:

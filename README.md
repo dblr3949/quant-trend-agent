@@ -341,8 +341,14 @@ cp config/openai.env.example config/openai.env
 
 ```env
 OPENAI_API_KEY=REPLACE_WITH_OPENAI_API_KEY
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_MODEL=gpt-5.5
+OPENAI_DECISION_REASONING_EFFORT=xhigh
+OPENAI_SUMMARY_REASONING_EFFORT=medium
+OPENAI_DECISION_VERBOSITY=low
+OPENAI_SUMMARY_VERBOSITY=medium
 ```
+
+默认使用 `gpt-5.5`。点位复核更重要，所以默认给 `OPENAI_DECISION_REASONING_EFFORT=xhigh`；重点总结默认 `medium`，控制成本和延迟。如果后续要单独拆模型，可以额外设置 `OPENAI_DECISION_MODEL` 或 `OPENAI_SUMMARY_MODEL`。
 
 `config/openai.env` 已加入 `.gitignore`，不会被提交。修改后重启网页服务：
 

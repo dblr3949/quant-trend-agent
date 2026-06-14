@@ -155,11 +155,23 @@ def _extract_json(text: str) -> dict:
         return json.loads(match.group(0))
 
 
+def _apply_gpt5_options(body: dict, kind: str, default_effort: str, default_verbosity: str) -> dict:
+    model = str(body.get("model") or "")
+    if not model.startswith("gpt-5"):
+        return body
+    effort = os.getenv(f"OPENAI_{kind}_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or default_effort
+    verbosity = os.getenv(f"OPENAI_{kind}_VERBOSITY") or os.getenv("OPENAI_VERBOSITY") or default_verbosity
+    body.pop("temperature", None)
+    body["reasoning"] = {"effort": effort}
+    body["text"] = {"verbosity": verbosity}
+    return body
+
+
 def _call_openai_decisions(compact: dict) -> dict | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or not compact.get("orders"):
         return None
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    model = os.getenv("OPENAI_DECISION_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
     system = (
         "你是美股半导体仓位管理的点位复核助手。"
         "每张单的主执行 candidate_id 只能从 candidate_levels 里选择；若 candidate_levels 为空，candidate_id 返回 null。"
@@ -173,7 +185,7 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         "{\"decisions\":[{\"symbol\":\"MU\",\"candidate_id\":\"C1\",\"rationale\":\"中文理由，60字内\","
         "\"reference_ladder\":[{\"label\":\"第一档\",\"price\":92.5,\"allocation_pct\":0.4,\"rationale\":\"中文理由\"}]}]}"
     )
-    body = {
+    body = _apply_gpt5_options({
         "model": model,
         "input": [
             {"role": "system", "content": system},
@@ -181,7 +193,7 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         ],
         "temperature": 0.1,
         "max_output_tokens": 1800,
-    }
+    }, "DECISION", "xhigh", "low")
     request = Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(body).encode("utf-8"),

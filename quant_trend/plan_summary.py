@@ -286,11 +286,23 @@ def _extract_openai_text(payload: dict) -> str:
     return "\n".join(chunks).strip()
 
 
+def _apply_gpt5_options(body: dict, kind: str, default_effort: str, default_verbosity: str) -> dict:
+    model = str(body.get("model") or "")
+    if not model.startswith("gpt-5"):
+        return body
+    effort = os.getenv(f"OPENAI_{kind}_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or default_effort
+    verbosity = os.getenv(f"OPENAI_{kind}_VERBOSITY") or os.getenv("OPENAI_VERBOSITY") or default_verbosity
+    body.pop("temperature", None)
+    body["reasoning"] = {"effort": effort}
+    body["text"] = {"verbosity": verbosity}
+    return body
+
+
 def _call_openai_summary(compact: dict) -> str | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    model = os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
     timeout = float(os.getenv("OPENAI_SUMMARY_TIMEOUT_SECONDS", "90"))
     system = (
         "你是美股半导体仓位管理助手。只做中文摘要，不给投资保证。"
@@ -307,7 +319,7 @@ def _call_openai_summary(compact: dict) -> str | None:
         "每段说清：现价、动作、关键点位、如有挂单则给方向/股数/价格。"
         "仓位/杠杆/保证金和用户约束要纳入判断。宏观、研报、IPO、流动性等若只是手动覆盖或数据不足，只能作为辅助风险提示，不要写成确定事实。"
     )
-    body = {
+    body = _apply_gpt5_options({
         "model": model,
         "input": [
             {"role": "system", "content": system},
@@ -315,7 +327,7 @@ def _call_openai_summary(compact: dict) -> str | None:
         ],
         "temperature": 0.2,
         "max_output_tokens": 2200,
-    }
+    }, "SUMMARY", "medium", "medium")
     request = Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(body).encode("utf-8"),
