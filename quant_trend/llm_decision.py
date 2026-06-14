@@ -136,11 +136,26 @@ def _compact_plan(plan: dict) -> dict:
             if symbol in market_technical
         },
         "orders": orders,
+        "trade_groups": [
+            {
+                "group_id": group.get("group_id"),
+                "symbol": group.get("symbol"),
+                "intent": group.get("intent"),
+                "current_price": group.get("current_price"),
+                "shares_held": group.get("shares_held"),
+                "net_shares_if_all_filled": group.get("net_shares_if_all_filled"),
+                "buy_order_id": (group.get("buy_order") or {}).get("order_id"),
+                "sell_order_id": (group.get("sell_order") or {}).get("order_id"),
+            }
+            for group in plan.get("trade_groups", [])
+        ],
         "instructions": (
             "每张订单以 order_id 唯一识别；primary candidate_id 只能从 candidate_levels 中选择。"
             "如果 candidate_levels 为空，primary candidate_id 返回 null。"
             "必须读取 prompt 与 prompt_overlay；明确禁止/绝对类约束是硬约束，普通偏好是软约束，"
             "可在技术面、指数环境或风控证据很强时给出中文理由反驳。"
+            "做T/range_trade 里 flat_preferred 只是净仓位偏好，不是硬配平；你可根据指标和prompt用 target_shares 调整买卖腿股数，"
+            "使组合净加仓、净减仓或净持平。只有 flat_required 才应尽量保持两腿全成交净股数为0。"
             "reference_ladder 是给用户参考的2-3档分层价，可以由你根据量价/指数/筹码占比自主定价格和幅度，"
             "但必须在 ladder_price_bounds 内，买入价低于现价、卖出价高于现价。"
         ),
@@ -198,10 +213,14 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         "但必须在输入的 ladder_price_bounds 内，且买入价低于现价、卖出价高于现价。"
         "必须同时考虑个股量价、筹码/成交占比、支撑压力力度、SPY/SMH/SOXX/VIXY、杠杆和保证金。"
         "必须读取用户本轮 prompt、prompt_overlay 和 decision_context；明确禁止/绝对类约束不可违反，普通偏好可被强证据反驳但要说明。"
+        "如果订单属于 range_trade/做T，同一标的的买腿和卖腿不必机械相等；"
+        "flat_preferred 表示用户偏好净仓位接近不变，但你可以根据指标与prompt决定净加仓、净减仓或净持平；"
+        "flat_required 才表示尽量保持两腿全成交净股数为0。"
         "买单目标是争取超额收益，优先更低且有结构承接的候选；卖单目标是更高减仓，但不能选择明显脱离可成交结构的孤立远点。"
+        "你可以为每张订单输出 target_shares 调整主建议股数；买入股数受预算风控上限保护，卖出股数不能超过持仓。"
         "reference_ladder 每档需给 label、price、allocation_pct、rationale。allocation_pct 为该单目标交易金额的比例，2-3档合计不超过1。"
         "只返回 JSON，不要 Markdown。格式："
-        "{\"decisions\":[{\"order_id\":\"rebalance:MU:buy\",\"symbol\":\"MU\",\"side\":\"buy\",\"candidate_id\":\"C1\",\"rationale\":\"中文理由，60字内\","
+        "{\"decisions\":[{\"order_id\":\"rebalance:MU:buy\",\"symbol\":\"MU\",\"side\":\"buy\",\"candidate_id\":\"C1\",\"target_shares\":8,\"rationale\":\"中文理由，60字内\","
         "\"reference_ladder\":[{\"label\":\"第一档\",\"price\":92.5,\"allocation_pct\":0.4,\"rationale\":\"中文理由\"}]}]}"
     )
     body = _apply_gpt5_options({
@@ -315,6 +334,48 @@ def _sanitize_ladder(order: dict, raw_ladder: object, position_shares: int) -> l
     return result
 
 
+def _decision_target_shares(order: dict, raw_shares: object, position_shares: int) -> int | None:
+    if raw_shares is None:
+        return None
+    try:
+        shares = int(float(raw_shares))
+    except (TypeError, ValueError):
+        return None
+    if shares <= 0:
+        return None
+    price = float(order.get("limit_price") or 0.0)
+    if price <= 0:
+        return None
+    if order.get("side") == "sell":
+        return min(shares, max(0, int(position_shares)))
+    target_value = float(order.get("target_trade_value") or order.get("notional") or 0.0)
+    current_value = float(order.get("notional") or 0.0)
+    cap_multiplier = max(1.0, float(os.getenv("OPENAI_DECISION_SHARE_CAP_MULTIPLIER", "2.0")))
+    cap_value = max(target_value, current_value, price) * cap_multiplier
+    max_shares = max(1, int(cap_value // price))
+    return min(shares, max_shares)
+
+
+def _refresh_trade_groups(plan: dict) -> None:
+    orders = plan.get("orders") or []
+    for group in plan.get("trade_groups") or []:
+        group_id = group.get("group_id")
+        buy_order = next((order for order in orders if order.get("trade_group_id") == group_id and order.get("side") == "buy"), None)
+        sell_order = next((order for order in orders if order.get("trade_group_id") == group_id and order.get("side") == "sell"), None)
+        group["buy_order"] = buy_order
+        group["sell_order"] = sell_order
+        buy_shares = int((buy_order or {}).get("shares") or 0)
+        sell_shares = int((sell_order or {}).get("shares") or 0)
+        buy_notional = float((buy_order or {}).get("notional") or 0.0)
+        sell_notional = float((sell_order or {}).get("notional") or 0.0)
+        group["net_shares_if_all_filled"] = buy_shares - sell_shares
+        group["net_cash_if_all_filled"] = round(sell_notional - buy_notional, 2)
+        if buy_order and sell_order and float(buy_order.get("limit_price") or 0.0) > 0:
+            group["estimated_spread_pct"] = round(float(sell_order.get("limit_price") or 0.0) / float(buy_order.get("limit_price") or 1.0) - 1.0, 4)
+        else:
+            group["estimated_spread_pct"] = None
+
+
 def _fallback_ladder(order: dict, position_shares: int) -> list[dict]:
     context = order.get("limit_context") or {}
     candidates = context.get("candidate_levels") or []
@@ -405,10 +466,13 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
         context = order.get("limit_context") or {}
         candidates = {str(level.get("candidate_id")): level for level in context.get("candidate_levels", [])}
         candidate = candidates.get(candidate_id)
+        old_price = float(order.get("limit_price") or 0.0)
+        old_shares = int(order.get("shares") or 0)
+        price_changed = False
+        share_changed = False
         if candidate:
             new_price = candidate.get("candidate_price") or candidate.get("price")
             if new_price:
-                old_price = float(order.get("limit_price") or 0.0)
                 new_price = float(new_price)
                 reference = float(context.get("reference_price") or 0.0)
                 invalid_side = (order.get("side") == "buy" and reference and new_price >= reference) or (order.get("side") == "sell" and reference and new_price <= reference)
@@ -430,17 +494,32 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
                     }
                     context["llm_selected_candidate_id"] = candidate_id
                     context["llm_selected_rationale"] = decision.get("rationale", "")
-                    applied.append(
-                        {
-                            "symbol": symbol,
-                            "order_id": order_id,
-                            "side": order.get("side"),
-                            "candidate_id": candidate_id,
-                            "old_limit_price": old_price,
-                            "new_limit_price": order["limit_price"],
-                            "rationale": decision.get("rationale", ""),
-                        }
-                    )
+                    price_changed = True
+        target_shares = _decision_target_shares(order, decision.get("target_shares"), position_shares)
+        if target_shares is not None and target_shares > 0 and target_shares != int(order.get("shares") or 0):
+            order["shares"] = target_shares
+            order["notional"] = round(target_shares * float(order.get("limit_price") or 0.0), 2)
+            order["llm_share_decision"] = {
+                "old_shares": old_shares,
+                "new_shares": target_shares,
+                "requested_shares": decision.get("target_shares"),
+                "rationale": decision.get("rationale", ""),
+            }
+            share_changed = True
+        if price_changed or share_changed:
+            applied.append(
+                {
+                    "symbol": symbol,
+                    "order_id": order_id,
+                    "side": order.get("side"),
+                    "candidate_id": candidate_id or None,
+                    "old_limit_price": old_price,
+                    "new_limit_price": order.get("limit_price"),
+                    "old_shares": old_shares,
+                    "new_shares": order.get("shares"),
+                    "rationale": decision.get("rationale", ""),
+                }
+            )
         ladder = _sanitize_ladder(order, decision.get("reference_ladder"), position_shares)
         if not ladder:
             ladder = _fallback_ladder(order, position_shares)
@@ -461,6 +540,7 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
             ladders.append({"symbol": symbol, "order_id": order.get("order_id"), "side": order.get("side"), "levels": ladder})
 
     if applied:
+        _refresh_trade_groups(plan)
         portfolio = plan.get("portfolio") or {}
         planned_buy = sum(float(order.get("notional") or 0.0) for order in plan.get("orders", []) if order.get("side") == "buy")
         planned_sell = sum(float(order.get("notional") or 0.0) for order in plan.get("orders", []) if order.get("side") == "sell")

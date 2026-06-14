@@ -168,7 +168,7 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(research["symbols"]["INTC"].get("no_add", False))
         self.assertLessEqual(research["symbols"]["INTC"]["bias"], 0)
 
-    def test_prompt_range_trade_creates_paired_buy_and_sell_plan(self):
+    def test_prompt_range_trade_creates_soft_flat_buy_and_sell_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             latest = write_bars(tmp, "MU", 100)
             for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
@@ -188,18 +188,42 @@ class AgentTests(unittest.TestCase):
             plan = build_trade_plan(portfolio, quotes, config, research, tmp)
 
             self.assertEqual(research["symbols"]["MU"]["trade_plan"], "range_trade")
-            self.assertEqual(research["symbols"]["MU"]["target_net_exposure"], "flat")
+            self.assertEqual(research["symbols"]["MU"]["target_net_exposure"], "flat_preferred")
             self.assertEqual(len(plan["trade_groups"]), 1)
             group = plan["trade_groups"][0]
             self.assertEqual(group["symbol"], "MU")
-            self.assertEqual(group["net_shares_if_all_filled"], 0)
+            self.assertEqual(group["intent"], "flat_preferred")
             self.assertIsNotNone(group["buy_order"])
             self.assertIsNotNone(group["sell_order"])
-            self.assertEqual(group["buy_order"]["shares"], group["sell_order"]["shares"])
             self.assertLess(group["buy_order"]["limit_price"], group["current_price"])
             self.assertGreater(group["sell_order"]["limit_price"], group["current_price"])
             range_orders = [order for order in plan["orders"] if order.get("strategy") == "range_trade" and order.get("symbol") == "MU"]
             self.assertEqual({order["side"] for order in range_orders}, {"buy", "sell"})
+
+    def test_prompt_range_trade_required_flat_still_pairs_shares(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = write_bars(tmp, "MU", 100)
+            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
+                write_bars(tmp, symbol, price)
+            asof = datetime.now(timezone.utc).isoformat()
+            quotes = {
+                "MU": Quote("MU", latest, asof=asof, source="test"),
+                "SPY": Quote("SPY", 700, asof=asof, source="test"),
+                "SMH": Quote("SMH", 350, asof=asof, source="test"),
+                "SOXX": Quote("SOXX", 300, asof=asof, source="test"),
+                "VIXY": Quote("VIXY", 16, asof=asof, source="test"),
+            }
+            portfolio = Portfolio(account_equity=100000, cash=100000, positions={"MU": Position("MU", 100, 100)})
+            config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
+            research = overlay_from_prompt("MU 做T，低位买回，高位卖出，必须总持仓不变", ["MU"])
+
+            plan = build_trade_plan(portfolio, quotes, config, research, tmp)
+
+            self.assertEqual(research["symbols"]["MU"]["target_net_exposure"], "flat_required")
+            group = plan["trade_groups"][0]
+            self.assertEqual(group["intent"], "flat_required")
+            self.assertEqual(group["net_shares_if_all_filled"], 0)
+            self.assertEqual(group["buy_order"]["shares"], group["sell_order"]["shares"])
 
     def test_intraday_summary_scores_recent_strength(self):
         bars = [

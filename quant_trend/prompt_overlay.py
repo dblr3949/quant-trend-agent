@@ -41,6 +41,18 @@ def _has_flat_trade_intent(text: str) -> bool:
     )
 
 
+def _has_required_flat_trade_intent(text: str) -> bool:
+    flat_words = r"(?:总持仓不变|总仓位不变|净仓位不变|仓位不变|持仓不变|不改变.*仓位|保持.*仓位)"
+    hard_words = r"(?:必须|严格|绝对|硬性|强制|一定)"
+    return _has_any(
+        text,
+        [
+            rf"{hard_words}.{{0,12}}{flat_words}",
+            rf"{flat_words}.{{0,12}}{hard_words}",
+        ],
+    )
+
+
 def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
     normalized = prompt.strip()
     if not normalized:
@@ -76,6 +88,7 @@ def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
     global_soft_no_add = _has_any(normalized, [r"全局.*不加", r"整体.*不加", r"不主动加仓", r"先不加仓", r"只减不加", r"少加仓", r"控制加仓"])
     global_range_trade = _has_range_trade_intent(normalized)
     global_flat_trade = _has_flat_trade_intent(normalized)
+    global_required_flat_trade = _has_required_flat_trade_intent(normalized)
 
     for symbol in [symbol.upper() for symbol in symbols]:
         text = " ".join(_segments_for_symbol(normalized, symbol))
@@ -123,10 +136,20 @@ def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
             notes.append("symbol_negative")
         if symbol_range_trade or _has_range_trade_intent(text):
             item["trade_plan"] = "range_trade"
-            item["target_net_exposure"] = "flat" if global_flat_trade or _has_flat_trade_intent(text) else "flexible"
-            if item["target_net_exposure"] == "flat":
+            symbol_required_flat = global_required_flat_trade or _has_required_flat_trade_intent(text)
+            symbol_flat_preference = global_flat_trade or _has_flat_trade_intent(text)
+            if symbol_required_flat:
+                item["target_net_exposure"] = "flat_required"
+            elif symbol_flat_preference:
+                item["target_net_exposure"] = "flat_preferred"
+            else:
+                item["target_net_exposure"] = "flexible"
+            if item["target_net_exposure"] == "flat_required":
                 item["bias"] = 0
-                notes.append("range_trade_flat")
+                notes.append("range_trade_flat_required")
+            elif item["target_net_exposure"] == "flat_preferred":
+                item["bias"] = 0
+                notes.append("range_trade_flat_preferred")
             else:
                 notes.append("range_trade")
 

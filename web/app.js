@@ -311,6 +311,8 @@ function translateReason(reason) {
       if (part === "inside_rebalance_band") return "差额在再平衡阈值内";
       if (part === "range_trade_prompt") return "本次想法：做T/高抛低吸";
       if (part === "range_trade_flat_prompt") return "目标：若两腿成交则净仓位不变";
+      if (part === "range_trade_flat_preferred_prompt") return "偏好：净仓位接近不变，但模型可反驳";
+      if (part === "range_trade_flat_required_prompt") return "硬约束：两腿全成交净股数尽量为 0";
       if (part === "range_trade_low_buy") return "低位买回腿";
       if (part === "range_trade_high_sell") return "高位卖出腿";
       if (part === "range_trade_buy_blocked") return "买腿受硬约束限制";
@@ -1634,7 +1636,7 @@ function renderTradeGroups(groups, plan) {
   target.innerHTML = `
     <div class="trade-groups-head">
       <h4>做T组合计划</h4>
-      <span>同一标的可同时给低吸与高抛；只成交一边会改变实际仓位</span>
+      <span>同一标的可同时给低吸与高抛；净股数由指标、风控和本次想法共同决定</span>
     </div>
     <div class="trade-group-grid">
       ${items
@@ -1643,6 +1645,12 @@ function renderTradeGroups(groups, plan) {
           const netShares = Number(group.net_shares_if_all_filled || 0);
           const netCash = Number(group.net_cash_if_all_filled || 0);
           const netClass = netShares === 0 ? "flat" : netShares > 0 ? "buy" : "sell";
+          const intentLabel =
+            group.intent === "flat_required"
+              ? "严格净仓位"
+              : group.intent === "flat_preferred" || group.intent === "flat"
+                ? "偏好净仓位"
+                : "弹性价差";
           return `
             <article class="trade-group-card ${netClass}">
               <div class="trade-group-title">
@@ -1650,7 +1658,7 @@ function renderTradeGroups(groups, plan) {
                   <strong>${escapeHtml(group.symbol)}</strong>
                   <span>${escapeHtml(group.title || "做T / 高抛低吸")} · 现价 ${fmtPrice(currentPrice)}</span>
                 </div>
-                <em>${group.intent === "flat" ? "净仓位不变" : "弹性价差"}</em>
+                <em>${intentLabel}</em>
               </div>
               <div class="trade-group-summary">
                 <div><span>两腿全成交净股数</span><b>${netShares > 0 ? "+" : ""}${netShares}</b></div>

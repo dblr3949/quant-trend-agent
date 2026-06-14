@@ -193,6 +193,69 @@ class LlmDecisionTests(unittest.TestCase):
         self.assertEqual(plan["orders"][0]["limit_price"], 95.0)
         self.assertEqual(plan["orders"][1]["limit_price"], 108.0)
 
+    def test_llm_decision_can_make_range_trade_net_directional(self):
+        buy_order = {
+            "order_id": "range_trade:MU:buy",
+            "symbol": "MU",
+            "side": "buy",
+            "strategy": "range_trade",
+            "trade_group_id": "range_trade:MU",
+            "pair_role": "low_buy",
+            "shares": 3,
+            "limit_price": 95.0,
+            "notional": 285.0,
+            "target_trade_value": 300.0,
+            "limit_context": {"reference_price": 100.0, "candidate_levels": []},
+        }
+        sell_order = {
+            "order_id": "range_trade:MU:sell",
+            "symbol": "MU",
+            "side": "sell",
+            "strategy": "range_trade",
+            "trade_group_id": "range_trade:MU",
+            "pair_role": "high_sell",
+            "shares": 3,
+            "limit_price": 110.0,
+            "notional": 330.0,
+            "target_trade_value": 300.0,
+            "limit_context": {"reference_price": 100.0, "candidate_levels": []},
+        }
+        plan = {
+            "portfolio": {},
+            "positions": [{"symbol": "MU", "shares": 100}],
+            "orders": [buy_order, sell_order],
+            "trade_groups": [
+                {
+                    "group_id": "range_trade:MU",
+                    "symbol": "MU",
+                    "intent": "flat_preferred",
+                    "buy_order": buy_order,
+                    "sell_order": sell_order,
+                    "net_shares_if_all_filled": 0,
+                    "net_cash_if_all_filled": 45.0,
+                    "estimated_spread_pct": 0.1579,
+                }
+            ],
+        }
+
+        with patch(
+            "quant_trend.llm_decision._call_openai_decisions",
+            return_value={
+                "decisions": [
+                    {"order_id": "range_trade:MU:buy", "symbol": "MU", "side": "buy", "target_shares": 5, "rationale": "指标支持多买一点"},
+                    {"order_id": "range_trade:MU:sell", "symbol": "MU", "side": "sell", "target_shares": 2, "rationale": "压力位先少卖"},
+                ]
+            },
+        ):
+            result = apply_llm_limit_decisions(plan)
+
+        self.assertEqual(len(result["applied"]), 2)
+        self.assertEqual(plan["orders"][0]["shares"], 5)
+        self.assertEqual(plan["orders"][1]["shares"], 2)
+        group = plan["trade_groups"][0]
+        self.assertEqual(group["net_shares_if_all_filled"], 3)
+        self.assertEqual(group["net_cash_if_all_filled"], -255.0)
+
 
 if __name__ == "__main__":
     unittest.main()

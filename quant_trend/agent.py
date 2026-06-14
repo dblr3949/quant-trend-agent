@@ -1666,7 +1666,16 @@ def _is_range_trade_overlay(overlay: dict) -> bool:
 
 
 def _is_flat_range_trade_overlay(overlay: dict) -> bool:
-    return _is_range_trade_overlay(overlay) and str(overlay.get("target_net_exposure") or "") == "flat"
+    return _is_range_trade_overlay(overlay) and str(overlay.get("target_net_exposure") or "") in {"flat_required", "flat_hard"}
+
+
+def _range_trade_target(overlay: dict) -> str:
+    target = str(overlay.get("target_net_exposure") or "flexible")
+    if target == "flat":
+        return "flat_preferred"
+    if target in {"flat_required", "flat_preferred", "flexible"}:
+        return target
+    return "flexible"
 
 
 def _range_trade_value(equity: float, current_value: float, risk: dict) -> float:
@@ -1859,16 +1868,21 @@ def build_trade_plan(
         portfolio_soft_no_reduce = trade_constraint in {"soft_no_reduce", "prefer_hold"}
         research_bias = _bias_from_research(research, symbol)
         intraday_summary = intraday_summaries.get(symbol)
-        range_trade_flat = _is_flat_range_trade_overlay(overlay)
+        range_trade_target = _range_trade_target(overlay) if _is_range_trade_overlay(overlay) else "flexible"
 
         action = "hold"
         side = None
         value_to_trade = 0.0
         if quote_stale:
             reasons.append(f"quote_stale:{quote_age:.1f}m")
-        elif range_trade_flat and current_gross_value <= max_gross_value:
+        elif _is_range_trade_overlay(overlay) and current_gross_value <= max_gross_value:
             action = "range_trade"
-            reasons.append("range_trade_flat_prompt")
+            if range_trade_target == "flat_required":
+                reasons.append("range_trade_flat_required_prompt")
+            elif range_trade_target == "flat_preferred":
+                reasons.append("range_trade_flat_preferred_prompt")
+            else:
+                reasons.append("range_trade_prompt")
         elif abs(delta_value) < threshold_value:
             reasons.append("inside_rebalance_band")
         elif delta_value > 0:
@@ -1986,7 +2000,9 @@ def build_trade_plan(
         trade_constraint = position.trade_constraint if position else "flexible"
         no_add = bool(overlay.get("no_add")) or trade_constraint == "reduce_only"
         no_reduce = bool(overlay.get("no_reduce"))
-        flat_intent = str(overlay.get("target_net_exposure") or "") == "flat"
+        range_target = _range_trade_target(overlay)
+        hard_flat_intent = range_target == "flat_required"
+        flat_preference = range_target in {"flat_required", "flat_preferred"}
         current_value = current_values.get(symbol, 0.0)
         trade_value = _range_trade_value(equity, current_value, risk)
         if margin_buy_budget is not None:
@@ -2020,13 +2036,14 @@ def build_trade_plan(
 
         buy_shares = 0 if no_add or not buy_price else int(trade_value // buy_price)
         sell_shares = 0 if no_reduce or shares_held <= 0 or not sell_price else min(int(trade_value // sell_price), shares_held)
-        if flat_intent:
+        if flat_preference:
             if buy_shares > 0 and sell_shares == 0 and not no_reduce and shares_held > 0 and sell_price:
                 sell_shares = min(buy_shares, shares_held)
             if sell_shares > 0 and buy_shares == 0 and not no_add and buy_price:
                 candidate_buy_notional = sell_shares * buy_price
                 if margin_buy_budget is None or candidate_buy_notional <= remaining_buy_value:
                     buy_shares = sell_shares
+        if hard_flat_intent:
             if buy_shares and sell_shares:
                 paired_shares = min(buy_shares, sell_shares)
                 buy_shares = paired_shares
@@ -2034,8 +2051,10 @@ def build_trade_plan(
 
         group_id = f"range_trade:{symbol}"
         group_reason = ["range_trade_prompt"]
-        if flat_intent:
-            group_reason.append("range_trade_flat_prompt")
+        if range_target == "flat_required":
+            group_reason.append("range_trade_flat_required_prompt")
+        elif range_target == "flat_preferred":
+            group_reason.append("range_trade_flat_preferred_prompt")
         if no_add:
             group_reason.append("range_trade_buy_blocked")
         if no_reduce or shares_held <= 0:
@@ -2081,7 +2100,7 @@ def build_trade_plan(
                     "group_id": group_id,
                     "strategy": "range_trade",
                     "symbol": symbol,
-                    "intent": "flat" if flat_intent else "flexible",
+                    "intent": range_target,
                     "title": "做T / 高抛低吸",
                     "current_price": round(snapshot.price, 4),
                     "shares_held": shares_held,

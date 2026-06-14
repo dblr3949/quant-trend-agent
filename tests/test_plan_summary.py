@@ -6,12 +6,17 @@ from quant_trend.plan_summary import _apply_gpt5_options, build_executive_summar
 
 
 class PlanSummaryTests(unittest.TestCase):
-    def test_gpt5_summary_request_uses_low_reasoning(self):
-        body = _apply_gpt5_options({"model": "gpt-5.5", "temperature": 0.2}, "SUMMARY", "low", "medium")
+    def test_gpt5_summary_request_uses_medium_reasoning_by_default(self):
+        body = _apply_gpt5_options({"model": "gpt-5.5", "temperature": 0.2}, "SUMMARY", "medium", "medium")
 
         self.assertNotIn("temperature", body)
-        self.assertEqual(body["reasoning"]["effort"], "low")
+        self.assertEqual(body["reasoning"]["effort"], "medium")
         self.assertEqual(body["text"]["verbosity"], "medium")
+
+    def test_gpt5_summary_retry_can_force_low_reasoning(self):
+        body = _apply_gpt5_options({"model": "gpt-5.5", "temperature": 0.2}, "SUMMARY", "medium", "medium", effort_override="low")
+
+        self.assertEqual(body["reasoning"]["effort"], "low")
 
     def test_fallback_summary_is_short_and_per_symbol(self):
         old_key = os.environ.pop("OPENAI_API_KEY", None)
@@ -105,6 +110,49 @@ class PlanSummaryTests(unittest.TestCase):
             self.assertEqual(summary["source"], "local_fallback")
             self.assertIn("-6~+6", summary["text"])
             self.assertNotIn("2/6", summary["text"])
+        finally:
+            if old_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = old_key
+
+    def test_empty_medium_summary_retries_low_and_combines_usage(self):
+        old_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "test-openai-key"
+        try:
+            plan = {
+                "regime": {"label": "neutral", "score": 0},
+                "portfolio": {"current_gross_exposure": 1.2},
+                "orders": [],
+                "technical_analysis": {"MU": {"score": 2, "supports": [], "resistances": []}},
+                "positions": [{"symbol": "MU", "current_weight": 0.3, "target_weight": 0.3, "action": "hold", "reason": "inside_rebalance_band"}],
+            }
+
+            with patch(
+                "quant_trend.plan_summary._call_openai_summary",
+                side_effect=[
+                    {
+                        "model": "gpt-5.5",
+                        "text": "",
+                        "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 20, "reasoning_tokens": 20, "total_tokens": 30},
+                        "effort": "medium",
+                        "error": "empty_output",
+                    },
+                    {
+                        "model": "gpt-5.5",
+                        "text": "MU：暂不动作，量价 +2 / -6~+6 · 尺位67%。",
+                        "usage": {"input_tokens": 11, "cached_input_tokens": 0, "output_tokens": 5, "reasoning_tokens": 1, "total_tokens": 16},
+                        "effort": "low",
+                    },
+                ],
+            ) as mocked:
+                summary = build_executive_summary(plan)
+
+            self.assertEqual(mocked.call_count, 2)
+            self.assertEqual(summary["source"], "llm")
+            self.assertEqual(summary["usage"]["input_tokens"], 21)
+            self.assertEqual(summary["usage"]["output_tokens"], 25)
+            self.assertIn("MU", summary["text"])
         finally:
             if old_key is None:
                 os.environ.pop("OPENAI_API_KEY", None)

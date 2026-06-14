@@ -79,6 +79,11 @@ def _reason_text(raw: str) -> str:
         "intraday_strong_down": "日内明显走弱",
         "inside_rebalance_band": "仓位差额不大",
         "buy_blocked": "买入被预算/风控拦截",
+        "range_trade_prompt": "本次做T",
+        "range_trade_flat_preferred_prompt": "偏好净仓位接近不变",
+        "range_trade_flat_required_prompt": "硬性净仓位不变",
+        "range_trade_low_buy": "低位买回腿",
+        "range_trade_high_sell": "高位卖出腿",
         "bucket_core": "核心桶",
         "bucket_satellite": "卫星桶",
         "bucket_watch": "观察桶",
@@ -295,11 +300,11 @@ def _extract_openai_text(payload: dict) -> str:
     return "\n".join(chunks).strip()
 
 
-def _apply_gpt5_options(body: dict, kind: str, default_effort: str, default_verbosity: str) -> dict:
+def _apply_gpt5_options(body: dict, kind: str, default_effort: str, default_verbosity: str, effort_override: str | None = None) -> dict:
     model = str(body.get("model") or "")
     if not model.startswith("gpt-5"):
         return body
-    effort = os.getenv(f"OPENAI_{kind}_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or default_effort
+    effort = effort_override or os.getenv(f"OPENAI_{kind}_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or default_effort
     verbosity = os.getenv(f"OPENAI_{kind}_VERBOSITY") or os.getenv("OPENAI_VERBOSITY") or default_verbosity
     body.pop("temperature", None)
     body["reasoning"] = {"effort": effort}
@@ -320,12 +325,18 @@ def _extract_openai_usage(payload: dict) -> dict:
     }
 
 
-def _call_openai_summary(compact: dict) -> dict | None:
+def _combine_usage(items: list[dict | None]) -> dict:
+    keys = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens")
+    return {key: sum(int((item or {}).get(key) or 0) for item in items) for key in keys}
+
+
+def _call_openai_summary(compact: dict, *, effort_override: str | None = None) -> dict | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
     model = os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
     timeout = float(os.getenv("OPENAI_SUMMARY_TIMEOUT_SECONDS", "90"))
+    max_output_tokens = int(os.getenv("OPENAI_SUMMARY_MAX_OUTPUT_TOKENS", "5000"))
     system = (
         "你是美股半导体仓位管理助手。只做中文摘要，不给投资保证。"
         "必须基于输入数据，每只股票一段话；必须覆盖输入positions里的全部symbol。"
@@ -348,8 +359,8 @@ def _call_openai_summary(compact: dict) -> dict | None:
             {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
         ],
         "temperature": 0.2,
-        "max_output_tokens": 2200,
-    }, "SUMMARY", "low", "medium")
+        "max_output_tokens": max_output_tokens,
+    }, "SUMMARY", "medium", "medium", effort_override=effort_override)
     request = Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(body).encode("utf-8"),
@@ -363,12 +374,20 @@ def _call_openai_summary(compact: dict) -> dict | None:
     with urlopen(request, timeout=timeout, context=context) as response:
         payload = json.loads(response.read().decode("utf-8"))
     text = _extract_openai_text(payload)
+    usage = _extract_openai_usage(payload)
     if not text:
-        return None
+        return {
+            "model": model,
+            "text": "",
+            "usage": usage,
+            "effort": (body.get("reasoning") or {}).get("effort"),
+            "error": "empty_output",
+        }
     return {
         "model": model,
         "text": text.strip(),
-        "usage": _extract_openai_usage(payload),
+        "usage": usage,
+        "effort": (body.get("reasoning") or {}).get("effort"),
     }
 
 
@@ -377,6 +396,12 @@ def build_executive_summary(plan: dict) -> dict:
     compact = _compact_plan(plan)
     try:
         result = _call_openai_summary(compact)
+        attempts = [result] if result else []
+        if isinstance(result, dict) and not result.get("text") and result.get("error") == "empty_output" and result.get("effort") != "low":
+            retry = _call_openai_summary(compact, effort_override="low")
+            if retry:
+                attempts.append(retry)
+                result = retry
     except Exception as exc:
         fallback["error"] = str(exc)
         return fallback
@@ -387,7 +412,13 @@ def build_executive_summary(plan: dict) -> dict:
         usage = result.get("usage")
         model = result.get("model")
         text = result.get("text")
+        if attempts:
+            usage = _combine_usage([item.get("usage") for item in attempts if isinstance(item, dict)])
     if not text:
+        if isinstance(result, dict):
+            fallback["error"] = result.get("error") or "empty_output"
+            fallback["model"] = model
+            fallback["usage"] = usage
         return fallback
     if _has_denominator_score_format(text):
         fallback["error"] = "LLM summary used denominator-style score formatting; local formatted fallback was used."
