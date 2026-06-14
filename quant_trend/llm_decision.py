@@ -77,6 +77,8 @@ def _compact_prompt_overlay(overlay: dict | None) -> dict:
             "soft_no_add": raw.get("soft_no_add"),
             "no_reduce": raw.get("no_reduce"),
             "thesis_status": raw.get("thesis_status"),
+            "trade_plan": raw.get("trade_plan"),
+            "target_net_exposure": raw.get("target_net_exposure"),
             "prompt_flags": raw.get("prompt_flags", []),
         }
     return {
@@ -101,8 +103,12 @@ def _compact_plan(plan: dict) -> dict:
         symbol = order.get("symbol")
         orders.append(
             {
+                "order_id": order.get("order_id"),
                 "symbol": symbol,
                 "side": order.get("side"),
+                "strategy": order.get("strategy"),
+                "trade_group_id": order.get("trade_group_id"),
+                "pair_role": order.get("pair_role"),
                 "current_limit_price": order.get("limit_price"),
                 "target_trade_value": order.get("target_trade_value") or order.get("notional"),
                 "current_shares": order.get("shares"),
@@ -131,7 +137,7 @@ def _compact_plan(plan: dict) -> dict:
         },
         "orders": orders,
         "instructions": (
-            "primary candidate_id 只能从 candidate_levels 中选择。"
+            "每张订单以 order_id 唯一识别；primary candidate_id 只能从 candidate_levels 中选择。"
             "如果 candidate_levels 为空，primary candidate_id 返回 null。"
             "必须读取 prompt 与 prompt_overlay；明确禁止/绝对类约束是硬约束，普通偏好是软约束，"
             "可在技术面、指数环境或风控证据很强时给出中文理由反驳。"
@@ -195,7 +201,7 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         "买单目标是争取超额收益，优先更低且有结构承接的候选；卖单目标是更高减仓，但不能选择明显脱离可成交结构的孤立远点。"
         "reference_ladder 每档需给 label、price、allocation_pct、rationale。allocation_pct 为该单目标交易金额的比例，2-3档合计不超过1。"
         "只返回 JSON，不要 Markdown。格式："
-        "{\"decisions\":[{\"symbol\":\"MU\",\"candidate_id\":\"C1\",\"rationale\":\"中文理由，60字内\","
+        "{\"decisions\":[{\"order_id\":\"rebalance:MU:buy\",\"symbol\":\"MU\",\"side\":\"buy\",\"candidate_id\":\"C1\",\"rationale\":\"中文理由，60字内\","
         "\"reference_ladder\":[{\"label\":\"第一档\",\"price\":92.5,\"allocation_pct\":0.4,\"rationale\":\"中文理由\"}]}]}"
     )
     body = _apply_gpt5_options({
@@ -379,16 +385,22 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
         }
 
     positions = {item.get("symbol"): item for item in plan.get("positions", [])}
+    orders_by_id = {item.get("order_id"): item for item in plan.get("orders", []) if item.get("order_id")}
     applied = []
     ladders = []
     for decision in decisions:
         if not isinstance(decision, dict):
             continue
+        order_id = str(decision.get("order_id") or "")
         symbol = str(decision.get("symbol") or "").upper()
+        side = str(decision.get("side") or "").lower()
         candidate_id = str(decision.get("candidate_id") or "")
-        order = next((item for item in plan.get("orders", []) if item.get("symbol") == symbol), None)
+        order = orders_by_id.get(order_id)
+        if not order:
+            order = next((item for item in plan.get("orders", []) if item.get("symbol") == symbol and (not side or item.get("side") == side)), None)
         if not order:
             continue
+        order_id = str(order.get("order_id") or order_id)
         position_shares = int((positions.get(symbol) or {}).get("shares") or order.get("shares") or 0)
         context = order.get("limit_context") or {}
         candidates = {str(level.get("candidate_id")): level for level in context.get("candidate_levels", [])}
@@ -421,6 +433,7 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
                     applied.append(
                         {
                             "symbol": symbol,
+                            "order_id": order_id,
                             "side": order.get("side"),
                             "candidate_id": candidate_id,
                             "old_limit_price": old_price,
@@ -433,7 +446,7 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
             ladder = _fallback_ladder(order, position_shares)
         if ladder:
             order["llm_reference_ladder"] = ladder
-            ladders.append({"symbol": symbol, "side": order.get("side"), "levels": ladder})
+            ladders.append({"symbol": symbol, "order_id": order.get("order_id"), "side": order.get("side"), "levels": ladder})
 
     for order in plan.get("orders", []):
         if order.get("llm_reference_ladder"):
@@ -445,7 +458,7 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
             for item in ladder:
                 item["source"] = "candidate_fallback"
             order["llm_reference_ladder"] = ladder
-            ladders.append({"symbol": symbol, "side": order.get("side"), "levels": ladder})
+            ladders.append({"symbol": symbol, "order_id": order.get("order_id"), "side": order.get("side"), "levels": ladder})
 
     if applied:
         portfolio = plan.get("portfolio") or {}

@@ -6,7 +6,7 @@ let progressTimer = null;
 const defaultSymbols = ["MU", "AAOI", "INTC", "LITE", "MRVL"];
 const regimeLabels = { risk_on: "风险偏多", neutral: "中性", risk_off: "风险收缩" };
 const kindLabels = { manual: "手动", premarket: "盘前", postmarket: "盘后", scheduled: "定时" };
-const actionLabels = { add: "加仓", reduce: "减仓", hold: "保持" };
+const actionLabels = { add: "加仓", reduce: "减仓", hold: "保持", range_trade: "做T" };
 const sideLabels = { buy: "买入", sell: "卖出" };
 const thesisLabels = { intact: "逻辑未破", watch: "观察", broken: "逻辑破坏" };
 const intradayLabels = { strong_up: "强势上行", up: "上行", mixed: "震荡", down: "下行", strong_down: "强势下行" };
@@ -309,6 +309,12 @@ function translateReason(reason) {
       if (part === "intraday_down") return "当日分钟线偏弱";
       if (part === "intraday_strong_down") return "当日分钟线强势下行";
       if (part === "inside_rebalance_band") return "差额在再平衡阈值内";
+      if (part === "range_trade_prompt") return "本次想法：做T/高抛低吸";
+      if (part === "range_trade_flat_prompt") return "目标：若两腿成交则净仓位不变";
+      if (part === "range_trade_low_buy") return "低位买回腿";
+      if (part === "range_trade_high_sell") return "高位卖出腿";
+      if (part === "range_trade_buy_blocked") return "买腿受硬约束限制";
+      if (part === "range_trade_sell_blocked") return "卖腿受持仓或硬约束限制";
       if (part === "buy_blocked") return "加仓条件不足";
       if (part === "prompt_no_add") return "本次想法硬限制：不加仓";
       if (part.startsWith("prompt_soft_no_add_overridden:")) return `反驳本次“不主动加仓”想法，证据分 ${formatReasonScore(part.split(":")[1], "prompt")}`;
@@ -1367,14 +1373,21 @@ function renderExecutiveSummary(summary) {
 
 function fallbackExecutiveSummary(plan) {
   if (!plan) return null;
-  const orders = Object.fromEntries((plan.orders || []).map((order) => [order.symbol, order]));
+  const ordersBySymbol = {};
+  for (const order of plan.orders || []) {
+    const key = String(order.symbol || "");
+    ordersBySymbol[key] = ordersBySymbol[key] || [];
+    ordersBySymbol[key].push(order);
+  }
   const rawLines = (plan.positions || [])
     .slice()
     .sort((a, b) => String(a.symbol).localeCompare(String(b.symbol)))
     .map((position) => {
-      const order = orders[position.symbol];
-      const action = position.action === "add" ? "加仓" : position.action === "reduce" ? "减仓" : "保持";
-      const orderText = order ? `，${order.side === "buy" ? "买" : "卖"}${order.shares}股@${order.limit_price}` : "";
+      const orders = ordersBySymbol[position.symbol] || [];
+      const action = labelAction(position.action);
+      const orderText = orders.length
+        ? `，${orders.map((order) => `${order.side === "buy" ? "买" : "卖"}${order.shares}股@${order.limit_price}`).join("；")}`
+        : "";
       const technical = plan.technical_analysis?.[position.symbol];
       const support = technical?.supports?.[0]?.price ? `支撑${fmtPrice(technical.supports[0].price)}` : "";
       const resistance = technical?.resistances?.[0]?.price ? `压力${fmtPrice(technical.resistances[0].price)}` : "";
@@ -1579,11 +1592,90 @@ function renderPriceCompare(currentPrice, limitPrice) {
   `;
 }
 
+function renderTradeLeg(order, title, tone, currentPrice) {
+  if (!order) {
+    return `
+      <div class="trade-leg blocked">
+        <div class="trade-leg-head"><strong>${escapeHtml(title)}</strong><span>未生成</span></div>
+        <p>受持仓、硬约束或金额限制，本轮没有生成这一腿。</p>
+      </div>
+    `;
+  }
+  const distance = Number.isFinite(Number(currentPrice)) && Number(currentPrice) > 0 ? Number(order.limit_price) / Number(currentPrice) - 1 : null;
+  return `
+    <div class="trade-leg ${escapeHtml(tone)}">
+      <div class="trade-leg-head">
+        <strong>${escapeHtml(title)}</strong>
+        ${renderSidePill(order.side)}
+      </div>
+      <div class="trade-leg-price">
+        <b>${fmtPrice(order.limit_price)}</b>
+        <span>${distance === null ? "" : `距现价 ${fmtPct(distance)}`}</span>
+      </div>
+      <div class="trade-leg-meta">
+        <span>${escapeHtml(order.shares)}股</span>
+        <span>${fmtMoney(order.notional)}</span>
+      </div>
+      <p>${escapeHtml(order.limit_basis || "")}</p>
+    </div>
+  `;
+}
+
+function renderTradeGroups(groups, plan) {
+  const target = $("tradeGroups");
+  if (!target) return;
+  const items = groups || [];
+  if (!items.length) {
+    target.innerHTML = "";
+    target.hidden = true;
+    return;
+  }
+  target.hidden = false;
+  target.innerHTML = `
+    <div class="trade-groups-head">
+      <h4>做T组合计划</h4>
+      <span>同一标的可同时给低吸与高抛；只成交一边会改变实际仓位</span>
+    </div>
+    <div class="trade-group-grid">
+      ${items
+        .map((group) => {
+          const currentPrice = Number(group.current_price ?? priceForSymbol(plan, group.symbol));
+          const netShares = Number(group.net_shares_if_all_filled || 0);
+          const netCash = Number(group.net_cash_if_all_filled || 0);
+          const netClass = netShares === 0 ? "flat" : netShares > 0 ? "buy" : "sell";
+          return `
+            <article class="trade-group-card ${netClass}">
+              <div class="trade-group-title">
+                <div>
+                  <strong>${escapeHtml(group.symbol)}</strong>
+                  <span>${escapeHtml(group.title || "做T / 高抛低吸")} · 现价 ${fmtPrice(currentPrice)}</span>
+                </div>
+                <em>${group.intent === "flat" ? "净仓位不变" : "弹性价差"}</em>
+              </div>
+              <div class="trade-group-summary">
+                <div><span>两腿全成交净股数</span><b>${netShares > 0 ? "+" : ""}${netShares}</b></div>
+                <div><span>两腿全成交净现金</span><b>${netCash >= 0 ? "+" : "-"}${fmtMoney(Math.abs(netCash))}</b></div>
+                <div><span>买卖价差</span><b>${group.estimated_spread_pct === null || group.estimated_spread_pct === undefined ? "-" : fmtPct(group.estimated_spread_pct)}</b></div>
+              </div>
+              <div class="trade-leg-grid">
+                ${renderTradeLeg(group.buy_order, "低吸买回", "buy", currentPrice)}
+                ${renderTradeLeg(group.sell_order, "高抛卖出", "sell", currentPrice)}
+              </div>
+              <p class="trade-group-note">${escapeHtml((group.notes || []).map((item) => translateReason(item)).filter(Boolean).join("；"))}</p>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function renderRun(plan) {
   const ordersBody = $("ordersBody");
   const positionsBody = $("positionsPlanBody");
   ordersBody.innerHTML = "";
   positionsBody.innerHTML = "";
+  if ($("tradeGroups")) $("tradeGroups").innerHTML = "";
   $("warnings").innerHTML = "";
   $("researchProcess").innerHTML = "";
   $("technicalAnalysis").innerHTML = "";
@@ -1600,6 +1692,7 @@ function renderRun(plan) {
     renderTechnicalAnalysis(null);
     renderResearchProcess(null);
     renderIntraday(null);
+    renderTradeGroups([], null);
     return;
   }
 
@@ -1615,6 +1708,7 @@ function renderRun(plan) {
   renderTechnicalAnalysis(plan.technical_analysis);
   renderResearchProcess(plan.research_process);
   renderIntraday(plan.intraday);
+  renderTradeGroups(plan.trade_groups, plan);
 
   for (const order of plan.orders || []) {
     const currentPrice = priceForSymbol(plan, order.symbol) ?? Number(order.limit_context?.reference_price);

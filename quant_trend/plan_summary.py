@@ -113,7 +113,9 @@ def _market_proxy_text(plan: dict) -> str:
 
 
 def _compact_plan(plan: dict) -> dict:
-    orders = {order.get("symbol"): order for order in plan.get("orders", [])}
+    orders_by_symbol: dict[str, list[dict]] = {}
+    for order in plan.get("orders", []):
+        orders_by_symbol.setdefault(str(order.get("symbol") or ""), []).append(order)
     technical = plan.get("technical_analysis", {}) or {}
     market_technical = plan.get("market_technical_analysis", {}) or {}
     regime = plan.get("regime", {}) or {}
@@ -136,6 +138,8 @@ def _compact_plan(plan: dict) -> dict:
         },
         "scorecard": plan.get("research_process", {}).get("scorecard", {}),
         "llm_limit_decisions": plan.get("llm_limit_decisions", {}),
+        "orders": plan.get("orders", []),
+        "trade_groups": plan.get("trade_groups", []),
         "sources": plan.get("research_process", {}).get("sources", []),
         "decision_context": plan.get("decision_context") or plan.get("research_process", {}).get("decision_factors", []),
         "positions": [
@@ -159,7 +163,7 @@ def _compact_plan(plan: dict) -> dict:
                 "intraday_score_text": _score_text(item.get("intraday_score"), item.get("intraday_score_range"), -5, 5),
                 "bucket": item.get("bucket"),
                 "trade_constraint": item.get("trade_constraint"),
-                "order": orders.get(item.get("symbol")),
+                "orders": orders_by_symbol.get(str(item.get("symbol") or ""), []),
                 "price_volume": {
                     **(technical.get(item.get("symbol"), {}) or {}),
                     "score_text": _score_text(
@@ -182,16 +186,21 @@ def _compact_plan(plan: dict) -> dict:
 def _fallback_summary(plan: dict) -> dict:
     regime = plan.get("regime", {})
     portfolio = plan.get("portfolio", {})
-    orders = {order.get("symbol"): order for order in plan.get("orders", [])}
+    orders_by_symbol: dict[str, list[dict]] = {}
+    for order in plan.get("orders", []):
+        orders_by_symbol.setdefault(str(order.get("symbol") or ""), []).append(order)
     positions = sorted(plan.get("positions", []), key=lambda item: item.get("symbol", ""))
     raw_lines = []
     for item in positions:
         symbol = item.get("symbol", "-")
-        order = orders.get(symbol)
+        symbol_orders = orders_by_symbol.get(str(symbol), [])
         order_text = ""
-        if order:
-            side = "买" if order.get("side") == "buy" else "卖"
-            order_text = f"，{side}{order.get('shares')}股@{order.get('limit_price')}"
+        if symbol_orders:
+            parts = []
+            for order in symbol_orders:
+                side = "买" if order.get("side") == "buy" else "卖"
+                parts.append(f"{side}{order.get('shares')}股@{order.get('limit_price')}")
+            order_text = "，" + "；".join(parts)
         technical = plan.get("technical_analysis", {}).get(symbol, {})
         tech_text = ""
         if technical:

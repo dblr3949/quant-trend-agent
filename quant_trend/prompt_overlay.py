@@ -11,6 +11,36 @@ def _has_any(text: str, patterns: list[str]) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
 
+def _has_range_trade_intent(text: str) -> bool:
+    return _has_any(
+        text,
+        [
+            r"做\s*[tT]",
+            r"\b[tT]\b",
+            r"高抛低吸",
+            r"低买高卖",
+            r"低位.*买.*高位.*卖",
+            r"高位.*卖.*低位.*买",
+            r"低位买回.*高位卖",
+        ],
+    )
+
+
+def _has_flat_trade_intent(text: str) -> bool:
+    return _has_any(
+        text,
+        [
+            r"总持仓不变",
+            r"总仓位不变",
+            r"净仓位不变",
+            r"仓位不变",
+            r"持仓不变",
+            r"不改变.*仓位",
+            r"保持.*仓位",
+        ],
+    )
+
+
 def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
     normalized = prompt.strip()
     if not normalized:
@@ -44,6 +74,8 @@ def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
 
     global_hard_no_add = _has_any(normalized, [r"全局.*(绝对|禁止|严禁).*加", r"整体.*(绝对|禁止|严禁).*加", r"全局.*hard no add"])
     global_soft_no_add = _has_any(normalized, [r"全局.*不加", r"整体.*不加", r"不主动加仓", r"先不加仓", r"只减不加", r"少加仓", r"控制加仓"])
+    global_range_trade = _has_range_trade_intent(normalized)
+    global_flat_trade = _has_flat_trade_intent(normalized)
 
     for symbol in [symbol.upper() for symbol in symbols]:
         text = " ".join(_segments_for_symbol(normalized, symbol))
@@ -52,6 +84,7 @@ def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
 
         item: dict = {}
         notes: list[str] = []
+        symbol_range_trade = global_range_trade and bool(text)
         if global_hard_no_add:
             item["no_add"] = True
             item["bias"] = min(float(item.get("bias", 0)), -1.5)
@@ -88,6 +121,14 @@ def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
         if _has_any(text, [r"减仓", r"卖", r"降低", r"降仓", r"reduce", r"sell"]):
             item["bias"] = min(float(item.get("bias", 0)), -1)
             notes.append("symbol_negative")
+        if symbol_range_trade or _has_range_trade_intent(text):
+            item["trade_plan"] = "range_trade"
+            item["target_net_exposure"] = "flat" if global_flat_trade or _has_flat_trade_intent(text) else "flexible"
+            if item["target_net_exposure"] == "flat":
+                item["bias"] = 0
+                notes.append("range_trade_flat")
+            else:
+                notes.append("range_trade")
 
         if notes:
             item["prompt_flags"] = notes

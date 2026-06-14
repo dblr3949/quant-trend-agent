@@ -1657,6 +1657,61 @@ def _limit_basis_text(side: str, context: dict) -> str:
     return f"参考{selected}，按历史结构边界控制追价"
 
 
+def _order_id(strategy: str, symbol: str, side: str) -> str:
+    return f"{strategy}:{symbol.upper()}:{side}"
+
+
+def _is_range_trade_overlay(overlay: dict) -> bool:
+    return str(overlay.get("trade_plan") or "") == "range_trade"
+
+
+def _is_flat_range_trade_overlay(overlay: dict) -> bool:
+    return _is_range_trade_overlay(overlay) and str(overlay.get("target_net_exposure") or "") == "flat"
+
+
+def _range_trade_value(equity: float, current_value: float, risk: dict) -> float:
+    min_value = float(risk.get("range_trade_min_value", risk.get("min_trade_value", 500.0)))
+    equity_cap = equity * float(risk.get("range_trade_equity_pct", 0.035))
+    position_cap = current_value * float(risk.get("range_trade_position_pct", 0.12)) if current_value > 0 else equity * 0.02
+    hard_cap = float(risk.get("range_trade_max_value", max(min_value, equity * 0.05)))
+    return max(min_value, min(hard_cap, equity_cap, position_cap))
+
+
+def _build_order(
+    symbol: str,
+    side: str,
+    shares: int,
+    limit_price: float,
+    value_to_trade: float,
+    action: str,
+    reason: str,
+    limit_context: dict,
+    strategy: str = "rebalance",
+    trade_group_id: str | None = None,
+    pair_role: str | None = None,
+) -> dict:
+    order = {
+        "order_id": _order_id(strategy, symbol, side),
+        "symbol": symbol,
+        "side": side,
+        "shares": shares,
+        "limit_price": limit_price,
+        "notional": round(shares * limit_price, 2),
+        "target_trade_value": round(value_to_trade, 2),
+        "time_in_force": "day",
+        "action": action,
+        "strategy": strategy,
+        "reason": reason,
+        "limit_basis": _limit_basis_text(side, limit_context),
+        "limit_context": limit_context,
+    }
+    if trade_group_id:
+        order["trade_group_id"] = trade_group_id
+    if pair_role:
+        order["pair_role"] = pair_role
+    return order
+
+
 def _position_value(portfolio: Portfolio, snapshots: dict[str, TechnicalSnapshot], symbol: str) -> float:
     position = portfolio.positions.get(symbol)
     if not position:
@@ -1804,12 +1859,16 @@ def build_trade_plan(
         portfolio_soft_no_reduce = trade_constraint in {"soft_no_reduce", "prefer_hold"}
         research_bias = _bias_from_research(research, symbol)
         intraday_summary = intraday_summaries.get(symbol)
+        range_trade_flat = _is_flat_range_trade_overlay(overlay)
 
         action = "hold"
         side = None
         value_to_trade = 0.0
         if quote_stale:
             reasons.append(f"quote_stale:{quote_age:.1f}m")
+        elif range_trade_flat and current_gross_value <= max_gross_value:
+            action = "range_trade"
+            reasons.append("range_trade_flat_prompt")
         elif abs(delta_value) < threshold_value:
             reasons.append("inside_rebalance_band")
         elif delta_value > 0:
@@ -1869,19 +1928,7 @@ def build_trade_plan(
             if side == "sell":
                 shares = min(shares, shares_held)
             if shares > 0:
-                order = {
-                    "symbol": symbol,
-                    "side": side,
-                    "shares": shares,
-                    "limit_price": limit_price,
-                    "notional": round(shares * limit_price, 2),
-                    "target_trade_value": round(value_to_trade, 2),
-                    "time_in_force": "day",
-                    "action": action,
-                    "reason": ";".join(reasons),
-                    "limit_basis": _limit_basis_text(side, limit_context),
-                    "limit_context": limit_context,
-                }
+                order = _build_order(symbol, side, shares, limit_price, value_to_trade, action, ";".join(reasons), limit_context)
                 orders.append(order)
             else:
                 action = "hold"
@@ -1922,6 +1969,126 @@ def build_trade_plan(
             }
         )
 
+    trade_groups = []
+    for symbol in sorted(symbols):
+        overlay = _symbol_overlay(research, symbol)
+        if not _is_range_trade_overlay(overlay):
+            continue
+        snapshot = snapshots.get(symbol)
+        if not snapshot:
+            continue
+        quote_age = snapshot.quote_age_minutes
+        if quote_age is not None and quote_age > float(risk["max_quote_age_minutes"]):
+            data_warnings.append(f"{symbol}: 做T计划跳过，行情时间过旧 {quote_age:.1f}m")
+            continue
+        position = portfolio.positions.get(symbol)
+        shares_held = position.shares if position else 0
+        trade_constraint = position.trade_constraint if position else "flexible"
+        no_add = bool(overlay.get("no_add")) or trade_constraint == "reduce_only"
+        no_reduce = bool(overlay.get("no_reduce"))
+        flat_intent = str(overlay.get("target_net_exposure") or "") == "flat"
+        current_value = current_values.get(symbol, 0.0)
+        trade_value = _range_trade_value(equity, current_value, risk)
+        if margin_buy_budget is not None:
+            trade_value = min(trade_value, max(0.0, remaining_buy_value))
+
+        buy_order = None
+        sell_order = None
+        buy_price = sell_price = None
+        buy_context = sell_context = None
+        if trade_value >= min_trade_value:
+            buy_price, buy_context = _limit_price(
+                "buy",
+                snapshot,
+                config,
+                daily_bars=daily_bars_by_symbol.get(symbol, []),
+                intraday_summary=intraday_summaries.get(symbol),
+                intraday_bars=(intraday_bars or {}).get(symbol, []),
+                regime=regime,
+                market_structure=market_structure,
+            )
+            sell_price, sell_context = _limit_price(
+                "sell",
+                snapshot,
+                config,
+                daily_bars=daily_bars_by_symbol.get(symbol, []),
+                intraday_summary=intraday_summaries.get(symbol),
+                intraday_bars=(intraday_bars or {}).get(symbol, []),
+                regime=regime,
+                market_structure=market_structure,
+            )
+
+        buy_shares = 0 if no_add or not buy_price else int(trade_value // buy_price)
+        sell_shares = 0 if no_reduce or shares_held <= 0 or not sell_price else min(int(trade_value // sell_price), shares_held)
+        if flat_intent and buy_shares and sell_shares:
+            paired_shares = min(buy_shares, sell_shares)
+            buy_shares = paired_shares
+            sell_shares = paired_shares
+
+        group_id = f"range_trade:{symbol}"
+        group_reason = ["range_trade_prompt"]
+        if flat_intent:
+            group_reason.append("range_trade_flat_prompt")
+        if no_add:
+            group_reason.append("range_trade_buy_blocked")
+        if no_reduce or shares_held <= 0:
+            group_reason.append("range_trade_sell_blocked")
+
+        if buy_shares > 0 and buy_price and buy_context:
+            buy_order = _build_order(
+                symbol,
+                "buy",
+                buy_shares,
+                buy_price,
+                buy_shares * buy_price,
+                "range_trade",
+                ";".join(group_reason + ["range_trade_low_buy"]),
+                buy_context,
+                strategy="range_trade",
+                trade_group_id=group_id,
+                pair_role="low_buy",
+            )
+            orders.append(buy_order)
+            remaining_buy_value = max(0.0, remaining_buy_value - float(buy_order.get("notional") or 0.0))
+        if sell_shares > 0 and sell_price and sell_context:
+            sell_order = _build_order(
+                symbol,
+                "sell",
+                sell_shares,
+                sell_price,
+                sell_shares * sell_price,
+                "range_trade",
+                ";".join(group_reason + ["range_trade_high_sell"]),
+                sell_context,
+                strategy="range_trade",
+                trade_group_id=group_id,
+                pair_role="high_sell",
+            )
+            orders.append(sell_order)
+
+        if buy_order or sell_order:
+            net_shares = int((buy_order or {}).get("shares") or 0) - int((sell_order or {}).get("shares") or 0)
+            net_cash = float((sell_order or {}).get("notional") or 0.0) - float((buy_order or {}).get("notional") or 0.0)
+            trade_groups.append(
+                {
+                    "group_id": group_id,
+                    "strategy": "range_trade",
+                    "symbol": symbol,
+                    "intent": "flat" if flat_intent else "flexible",
+                    "title": "做T / 高抛低吸",
+                    "current_price": round(snapshot.price, 4),
+                    "shares_held": shares_held,
+                    "net_shares_if_all_filled": net_shares,
+                    "net_cash_if_all_filled": round(net_cash, 2),
+                    "estimated_spread_pct": round((float(sell_order["limit_price"]) / float(buy_order["limit_price"]) - 1.0), 4) if buy_order and sell_order else None,
+                    "buy_order": buy_order,
+                    "sell_order": sell_order,
+                    "notes": group_reason,
+                }
+            )
+        elif _is_range_trade_overlay(overlay):
+            data_warnings.append(f"{symbol}: 做T计划未生成，金额不足或受硬约束限制。")
+
     planned_buy_notional = sum(float(order.get("notional", 0.0)) for order in orders if order.get("side") == "buy")
     planned_sell_notional = sum(float(order.get("notional", 0.0)) for order in orders if order.get("side") == "sell")
     min_cushion = float(risk.get("min_margin_cushion", 50000.0))
@@ -1961,6 +2128,7 @@ def build_trade_plan(
         },
         "regime": regime,
         "orders": orders,
+        "trade_groups": trade_groups,
         "positions": positions,
         "data_warnings": data_warnings,
         "research_overlay": research,

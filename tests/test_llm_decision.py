@@ -139,6 +139,60 @@ class LlmDecisionTests(unittest.TestCase):
         self.assertEqual(plan["orders"][0]["limit_price"], 95.0)
         self.assertIn("llm_reference_ladder", plan["orders"][0])
 
+    def test_llm_decision_uses_order_id_when_symbol_has_two_sides(self):
+        plan = {
+            "portfolio": {},
+            "positions": [{"symbol": "MU", "shares": 100}],
+            "orders": [
+                {
+                    "order_id": "range_trade:MU:buy",
+                    "symbol": "MU",
+                    "side": "buy",
+                    "shares": 10,
+                    "limit_price": 95.0,
+                    "notional": 950.0,
+                    "target_trade_value": 1000.0,
+                    "limit_context": {
+                        "reference_price": 100.0,
+                        "candidate_levels": [{"candidate_id": "B1", "candidate_price": 94.0, "source": "低吸支撑"}],
+                    },
+                },
+                {
+                    "order_id": "range_trade:MU:sell",
+                    "symbol": "MU",
+                    "side": "sell",
+                    "shares": 10,
+                    "limit_price": 105.0,
+                    "notional": 1050.0,
+                    "target_trade_value": 1000.0,
+                    "limit_context": {
+                        "reference_price": 100.0,
+                        "candidate_levels": [{"candidate_id": "S1", "candidate_price": 108.0, "source": "高抛压力"}],
+                    },
+                },
+            ],
+        }
+
+        with patch(
+            "quant_trend.llm_decision._call_openai_decisions",
+            return_value={
+                "decisions": [
+                    {
+                        "order_id": "range_trade:MU:sell",
+                        "symbol": "MU",
+                        "side": "sell",
+                        "candidate_id": "S1",
+                        "rationale": "上方压力更适合卖出",
+                    }
+                ]
+            },
+        ):
+            result = apply_llm_limit_decisions(plan)
+
+        self.assertEqual(result["applied"][0]["order_id"], "range_trade:MU:sell")
+        self.assertEqual(plan["orders"][0]["limit_price"], 95.0)
+        self.assertEqual(plan["orders"][1]["limit_price"], 108.0)
+
 
 if __name__ == "__main__":
     unittest.main()
