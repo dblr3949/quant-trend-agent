@@ -1,0 +1,25 @@
+{
+  "symbols": ["MU", "AAOI", "INTC", "LITE", "MRVL"],
+  "market_proxies": ["SPY", "SMH", "SOXX", "VIXY"],
+  "core_symbols": ["MU", "MRVL", "LITE"],
+  "base_target_weights": {
+    "MU": 0.42,
+    "MRVL": 0.30,
+    "LITE": 0.24,
+    "AAOI": 0.22,
+    "INTC": 0.14
+  },
+  "risk": {
+    "max_gross_exposure": 2.0,
+    "risk_on_gross_exposure": 1.65,
+    "neutral_gross_exposure": 1.25,
+    "risk_off_gross_exposure": 0.85,
+    "max_symbol_weight": 0.48,
+    "max_noncore_symbol_weight": 0.28,
+    "min_trade_value": 500.0,
+    "rebalance_band_pct": 0.015,
+    "max_quote_age_minutes": 20.0,
+    "limit_offset_bps": 15.0,
+    "max_limit_offset_bps": 80.0
+  }
+}

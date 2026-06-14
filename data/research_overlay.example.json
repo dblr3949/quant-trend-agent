@@ -1,0 +1,42 @@
+{
+  "asof": "2026-06-11T08:30:00-04:00",
+  "macro_bias": 0,
+  "liquidity_bias": 0,
+  "geopolitical_bias": 0,
+  "symbols": {
+    "MU": {
+      "bias": 1,
+      "thesis_status": "intact",
+      "note": "Memory pricing and HBM thesis intact."
+    },
+    "AAOI": {
+      "bias": 0,
+      "thesis_status": "intact",
+      "note": "High beta optical exposure; keep sizing tighter."
+    },
+    "INTC": {
+      "bias": -1,
+      "thesis_status": "watch",
+      "note": "Require evidence before adding."
+    },
+    "LITE": {
+      "bias": 1,
+      "thesis_status": "intact",
+      "note": "Optical cycle and AI datacenter exposure."
+    },
+    "MRVL": {
+      "bias": 1,
+      "thesis_status": "intact",
+      "note": "NVDA ecosystem/custom silicon exposure."
+    }
+  },
+  "events": [
+    {
+      "name": "Example macro event",
+      "direction": "neutral",
+      "severity": 0,
+      "expires": "2026-06-12",
+      "note": "Set direction to risk_off/risk_on and severity 1-3 for real events."
+    }
+  ]
+}

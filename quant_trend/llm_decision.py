@@ -1,0 +1,416 @@
+import json
+import os
+import re
+import ssl
+from datetime import datetime, timezone
+from urllib.request import Request, urlopen
+
+
+def _openai_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+    except Exception:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def _compact_level(level: dict) -> dict:
+    return {
+        "candidate_id": level.get("candidate_id"),
+        "price": level.get("price"),
+        "candidate_price": level.get("candidate_price"),
+        "source": level.get("source"),
+        "category": level.get("category"),
+        "tier": level.get("tier"),
+        "distance_pct": level.get("distance_pct"),
+        "chip_share_pct": level.get("chip_share_pct"),
+        "volume_share_pct": level.get("volume_share_pct"),
+        "profile_role": level.get("profile_role"),
+        "profile_window": level.get("profile_window"),
+        "profile_rank": level.get("profile_rank"),
+        "confluence_count": level.get("confluence_count"),
+        "touch_count": level.get("touch_count"),
+        "recency_days": level.get("recency_days"),
+        "level_strength_score": level.get("level_strength_score"),
+        "within_offset_band": level.get("within_offset_band"),
+    }
+
+
+def _ladder_bounds(order: dict) -> tuple[float, float]:
+    context = order.get("limit_context") or {}
+    reference = float(context.get("reference_price") or order.get("limit_price") or 0.0)
+    offsets = context.get("offset_pct_range") or []
+    max_offset = max([float(value) for value in offsets if value is not None] or [0.08])
+    max_span = max(0.12, min(0.35, max_offset * 2.2))
+    if order.get("side") == "buy":
+        return max(0.0001, reference * (1 - max_span)), reference * 0.997
+    return reference * 1.003, reference * (1 + max_span)
+
+
+def _compact_technical(item: dict | None) -> dict:
+    if not item:
+        return {}
+    return {
+        "price": item.get("price"),
+        "score": item.get("score"),
+        "score_range": item.get("score_range"),
+        "label": item.get("label"),
+        "range_position": item.get("range_position"),
+        "volume_ratio20": item.get("volume_ratio20"),
+        "supports": [_compact_level(level) for level in (item.get("supports") or [])[:5]],
+        "resistances": [_compact_level(level) for level in (item.get("resistances") or [])[:5]],
+        "components": item.get("components", []),
+        "explanation": item.get("explanation"),
+    }
+
+
+def _compact_prompt_overlay(overlay: dict | None) -> dict:
+    if not overlay:
+        return {}
+    symbols = {}
+    for symbol, raw in (overlay.get("symbols") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        symbols[str(symbol).upper()] = {
+            "bias": raw.get("bias"),
+            "no_add": raw.get("no_add"),
+            "soft_no_add": raw.get("soft_no_add"),
+            "no_reduce": raw.get("no_reduce"),
+            "thesis_status": raw.get("thesis_status"),
+            "prompt_flags": raw.get("prompt_flags", []),
+        }
+    return {
+        "source": overlay.get("source"),
+        "manual_prompt": overlay.get("manual_prompt"),
+        "macro_bias": overlay.get("macro_bias"),
+        "liquidity_bias": overlay.get("liquidity_bias"),
+        "geopolitical_bias": overlay.get("geopolitical_bias"),
+        "symbols": symbols,
+        "events": (overlay.get("events") or [])[:8],
+    }
+
+
+def _compact_plan(plan: dict) -> dict:
+    positions = {item.get("symbol"): item for item in plan.get("positions", [])}
+    technical = plan.get("technical_analysis", {}) or {}
+    market_technical = plan.get("market_technical_analysis", {}) or {}
+    orders = []
+    for order in plan.get("orders", []):
+        context = order.get("limit_context") or {}
+        candidates = [_compact_level(level) for level in (context.get("candidate_levels") or [])[:8]]
+        symbol = order.get("symbol")
+        orders.append(
+            {
+                "symbol": symbol,
+                "side": order.get("side"),
+                "current_limit_price": order.get("limit_price"),
+                "target_trade_value": order.get("target_trade_value") or order.get("notional"),
+                "current_shares": order.get("shares"),
+                "reference_price": context.get("reference_price"),
+                "ladder_price_bounds": _ladder_bounds(order),
+                "offset_pct_range": context.get("offset_pct_range"),
+                "selected_source": context.get("selected_source"),
+                "limit_basis": order.get("limit_basis"),
+                "position": positions.get(symbol, {}),
+                "technical": _compact_technical(technical.get(symbol)),
+                "candidate_levels": candidates,
+            }
+        )
+    return {
+        "asof": plan.get("asof"),
+        "prompt": plan.get("run", {}).get("prompt") or "",
+        "prompt_overlay": _compact_prompt_overlay(plan.get("research_overlay")),
+        "decision_context": plan.get("decision_context", []),
+        "portfolio": plan.get("portfolio", {}),
+        "regime": plan.get("regime", {}),
+        "market_structure": plan.get("market_structure", {}),
+        "market_technical_analysis": {
+            symbol: _compact_technical(market_technical.get(symbol))
+            for symbol in ("SPY", "SMH", "SOXX", "VIXY")
+            if symbol in market_technical
+        },
+        "orders": orders,
+        "instructions": (
+            "primary candidate_id 只能从 candidate_levels 中选择。"
+            "如果 candidate_levels 为空，primary candidate_id 返回 null。"
+            "必须读取 prompt 与 prompt_overlay；明确禁止/绝对类约束是硬约束，普通偏好是软约束，"
+            "可在技术面、指数环境或风控证据很强时给出中文理由反驳。"
+            "reference_ladder 是给用户参考的2-3档分层价，可以由你根据量价/指数/筹码占比自主定价格和幅度，"
+            "但必须在 ladder_price_bounds 内，买入价低于现价、卖出价高于现价。"
+        ),
+    }
+
+
+def _extract_json(text: str) -> dict:
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.S)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def _call_openai_decisions(compact: dict) -> dict | None:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or not compact.get("orders"):
+        return None
+    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    system = (
+        "你是美股半导体仓位管理的点位复核助手。"
+        "每张单的主执行 candidate_id 只能从 candidate_levels 里选择；若 candidate_levels 为空，candidate_id 返回 null。"
+        "另外你必须为每张单输出 2到3 档 reference_ladder，作为用户参考价梯；价梯价格可由你自行决定，不必等于候选价，"
+        "但必须在输入的 ladder_price_bounds 内，且买入价低于现价、卖出价高于现价。"
+        "必须同时考虑个股量价、筹码/成交占比、支撑压力力度、SPY/SMH/SOXX/VIXY、杠杆和保证金。"
+        "必须读取用户本轮 prompt、prompt_overlay 和 decision_context；明确禁止/绝对类约束不可违反，普通偏好可被强证据反驳但要说明。"
+        "买单目标是争取超额收益，优先更低且有结构承接的候选；卖单目标是更高减仓，但不能选择明显脱离可成交结构的孤立远点。"
+        "reference_ladder 每档需给 label、price、allocation_pct、rationale。allocation_pct 为该单目标交易金额的比例，2-3档合计不超过1。"
+        "只返回 JSON，不要 Markdown。格式："
+        "{\"decisions\":[{\"symbol\":\"MU\",\"candidate_id\":\"C1\",\"rationale\":\"中文理由，60字内\","
+        "\"reference_ladder\":[{\"label\":\"第一档\",\"price\":92.5,\"allocation_pct\":0.4,\"rationale\":\"中文理由\"}]}]}"
+    )
+    body = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
+        ],
+        "temperature": 0.1,
+        "max_output_tokens": 1800,
+    }
+    request = Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=35, context=_openai_ssl_context()) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    text = str(payload.get("output_text") or "")
+    if not text:
+        chunks = []
+        for item in payload.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in {"output_text", "text"} and content.get("text"):
+                    chunks.append(str(content["text"]))
+        text = "\n".join(chunks)
+    return _extract_json(text) if text else None
+
+
+def _side_price_valid(side: str, price: float, reference: float, bounds: tuple[float, float]) -> bool:
+    low, high = bounds
+    if price < low or price > high:
+        return False
+    if side == "buy":
+        return price < reference
+    return price > reference
+
+
+def _sanitize_ladder(order: dict, raw_ladder: object, position_shares: int) -> list[dict]:
+    if not isinstance(raw_ladder, list):
+        raw_ladder = []
+    side = str(order.get("side") or "")
+    context = order.get("limit_context") or {}
+    reference = float(context.get("reference_price") or order.get("limit_price") or 0.0)
+    bounds = _ladder_bounds(order)
+    target_value = float(order.get("target_trade_value") or order.get("notional") or 0.0)
+    fallback_allocations = [0.4, 0.35, 0.25]
+    used_value = 0.0
+    remaining_shares = position_shares
+    result = []
+
+    for index, raw in enumerate(raw_ladder[:3]):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            price = float(raw.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if not _side_price_valid(side, price, reference, bounds):
+            continue
+        try:
+            allocation = float(raw.get("allocation_pct"))
+        except (TypeError, ValueError):
+            allocation = fallback_allocations[min(index, len(fallback_allocations) - 1)]
+        allocation = max(0.05, min(0.7, allocation))
+        if target_value and used_value + allocation * target_value > target_value:
+            allocation = max(0.0, (target_value - used_value) / target_value)
+        if allocation <= 0:
+            continue
+        notional = target_value * allocation
+        shares = int(notional // price) if price > 0 else 0
+        if side == "sell":
+            shares = min(shares, remaining_shares)
+            remaining_shares -= shares
+        if shares <= 0:
+            continue
+        rounded_price = round(price, 4 if price < 1 else 2)
+        used_value += allocation * target_value
+        result.append(
+            {
+                "label": str(raw.get("label") or f"第{len(result) + 1}档"),
+                "original_label": str(raw.get("label") or f"第{len(result) + 1}档"),
+                "price": rounded_price,
+                "distance_pct": round((rounded_price / reference) - 1.0, 5) if reference else None,
+                "allocation_pct": round(allocation, 4),
+                "shares": shares,
+                "notional": round(shares * rounded_price, 2),
+                "rationale": str(raw.get("rationale") or "")[:120],
+                "source": "llm",
+                "reference_only": True,
+            }
+        )
+    result = sorted(result, key=lambda item: float(item.get("price") or 0.0), reverse=side == "buy")
+    for index, item in enumerate(result, start=1):
+        item["label"] = f"第{index}档"
+    return result
+
+
+def _fallback_ladder(order: dict, position_shares: int) -> list[dict]:
+    context = order.get("limit_context") or {}
+    candidates = context.get("candidate_levels") or []
+    side = str(order.get("side") or "")
+    bounds = _ladder_bounds(order)
+    reference = float(context.get("reference_price") or order.get("limit_price") or 0.0)
+    if side == "buy":
+        ordered = sorted(candidates, key=lambda item: float(item.get("candidate_price") or item.get("price") or 0.0), reverse=True)
+    else:
+        ordered = sorted(candidates, key=lambda item: float(item.get("candidate_price") or item.get("price") or 0.0))
+    raw = []
+    for candidate in ordered:
+        if len(raw) >= 3:
+            break
+        price = candidate.get("candidate_price") or candidate.get("price")
+        if not price:
+            continue
+        price = float(price)
+        if not _side_price_valid(side, price, reference, bounds):
+            continue
+        raw.append(
+            {
+                "label": f"第{len(raw) + 1}档",
+                "price": price,
+                "allocation_pct": [0.4, 0.35, 0.25][min(len(raw), 2)],
+                "rationale": f"参考{candidate.get('source', '候选结构位')}",
+            }
+        )
+    return _sanitize_ladder(order, raw, position_shares)
+
+
+def apply_llm_limit_decisions(plan: dict) -> dict | None:
+    compact = _compact_plan(plan)
+    if not compact.get("orders"):
+        return None
+    try:
+        payload = _call_openai_decisions(compact)
+    except Exception as exc:
+        return {
+            "asof": datetime.now(timezone.utc).isoformat(),
+            "source": "llm_error",
+            "error": str(exc),
+            "applied": [],
+        }
+    if not payload:
+        return None
+
+    decisions = payload.get("decisions") if isinstance(payload, dict) else None
+    if not isinstance(decisions, list):
+        return {
+            "asof": datetime.now(timezone.utc).isoformat(),
+            "source": "llm_invalid",
+            "applied": [],
+        }
+
+    positions = {item.get("symbol"): item for item in plan.get("positions", [])}
+    applied = []
+    ladders = []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        symbol = str(decision.get("symbol") or "").upper()
+        candidate_id = str(decision.get("candidate_id") or "")
+        order = next((item for item in plan.get("orders", []) if item.get("symbol") == symbol), None)
+        if not order:
+            continue
+        position_shares = int((positions.get(symbol) or {}).get("shares") or order.get("shares") or 0)
+        context = order.get("limit_context") or {}
+        candidates = {str(level.get("candidate_id")): level for level in context.get("candidate_levels", [])}
+        candidate = candidates.get(candidate_id)
+        if candidate:
+            new_price = candidate.get("candidate_price") or candidate.get("price")
+            if new_price:
+                old_price = float(order.get("limit_price") or 0.0)
+                new_price = float(new_price)
+                reference = float(context.get("reference_price") or 0.0)
+                invalid_side = (order.get("side") == "buy" and reference and new_price >= reference) or (order.get("side") == "sell" and reference and new_price <= reference)
+                target_value = float(order.get("target_trade_value") or order.get("notional") or 0.0)
+                shares = int(target_value // new_price) if new_price > 0 else 0
+                if order.get("side") == "sell":
+                    shares = min(shares, position_shares)
+                if not invalid_side and shares > 0:
+                    order["limit_price"] = round(new_price, 4 if new_price < 1 else 2)
+                    order["shares"] = shares
+                    order["notional"] = round(shares * order["limit_price"], 2)
+                    order["limit_basis"] = f"LLM选择候选{candidate_id}：{candidate.get('source')}；{decision.get('rationale', '')}"
+                    order["llm_limit_decision"] = {
+                        "candidate_id": candidate_id,
+                        "old_limit_price": old_price,
+                        "new_limit_price": order["limit_price"],
+                        "rationale": decision.get("rationale", ""),
+                        "candidate": candidate,
+                    }
+                    context["llm_selected_candidate_id"] = candidate_id
+                    context["llm_selected_rationale"] = decision.get("rationale", "")
+                    applied.append(
+                        {
+                            "symbol": symbol,
+                            "side": order.get("side"),
+                            "candidate_id": candidate_id,
+                            "old_limit_price": old_price,
+                            "new_limit_price": order["limit_price"],
+                            "rationale": decision.get("rationale", ""),
+                        }
+                    )
+        ladder = _sanitize_ladder(order, decision.get("reference_ladder"), position_shares)
+        if not ladder:
+            ladder = _fallback_ladder(order, position_shares)
+        if ladder:
+            order["llm_reference_ladder"] = ladder
+            ladders.append({"symbol": symbol, "side": order.get("side"), "levels": ladder})
+
+    for order in plan.get("orders", []):
+        if order.get("llm_reference_ladder"):
+            continue
+        symbol = str(order.get("symbol") or "").upper()
+        position_shares = int((positions.get(symbol) or {}).get("shares") or order.get("shares") or 0)
+        ladder = _fallback_ladder(order, position_shares)
+        if ladder:
+            for item in ladder:
+                item["source"] = "candidate_fallback"
+            order["llm_reference_ladder"] = ladder
+            ladders.append({"symbol": symbol, "side": order.get("side"), "levels": ladder})
+
+    if applied:
+        portfolio = plan.get("portfolio") or {}
+        planned_buy = sum(float(order.get("notional") or 0.0) for order in plan.get("orders", []) if order.get("side") == "buy")
+        planned_sell = sum(float(order.get("notional") or 0.0) for order in plan.get("orders", []) if order.get("side") == "sell")
+        portfolio["planned_buy_notional"] = round(planned_buy, 2)
+        portfolio["planned_sell_notional"] = round(planned_sell, 2)
+        if portfolio.get("margin_cushion") is not None:
+            haircut = 0.5
+            after_buys = float(portfolio.get("margin_cushion") or 0.0) - planned_buy * haircut
+            portfolio["estimated_margin_cushion_after_buys"] = round(after_buys, 2)
+
+    return {
+        "asof": datetime.now(timezone.utc).isoformat(),
+        "source": "llm_candidate_selector",
+        "applied": applied,
+        "ladders": ladders,
+    }

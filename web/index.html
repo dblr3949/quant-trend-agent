@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Semis Position Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Semis Position Agent</h1>
+        <p id="statusLine">加载中</p>
+      </div>
+      <div class="top-actions">
+        <label class="field compact" title="只决定行情从哪里读取；持仓仍然只来自你在本页保存的 BBAE 持仓。">
+          <span>行情源 <span class="hint" title="只读行情源，不读取任何券商持仓或订单。">?</span></span>
+          <select id="provider">
+            <option value="yahoo_chart">Yahoo 日线快照</option>
+            <option value="yfinance">Yahoo 兜底</option>
+            <option value="file">本地报价文件</option>
+            <option value="ibkr">IBKR 只读行情</option>
+            <option value="alpaca">Alpaca 行情</option>
+          </select>
+        </label>
+        <label class="toggle" title="缺少本地日线 CSV 时，自动补齐用于均线、ATR、趋势判断的历史日线。">
+          <input id="refreshHistory" type="checkbox" checked />
+          <span>补日线 <span class="hint" title="用于技术面计算，不是实时行情。">?</span></span>
+        </label>
+        <label class="toggle" title="服务运行期间按盘前/盘后时间自动生成记录。关闭服务后不会运行。">
+          <input id="scheduleEnabled" type="checkbox" />
+          <span>自动跑 <span class="hint" title="本地服务开着才会自动跑；不会自动下单。">?</span></span>
+        </label>
+        <button id="saveSettingsBtn" type="button">保存设置</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section id="ibkrSettings" class="ibkr-panel" hidden>
+        <div class="section-head">
+          <h2>IBKR 行情设置</h2>
+          <span class="pill">只读行情，不读持仓/订单，不下单</span>
+        </div>
+        <p class="safety-note">
+          底线：本程序对 IBKR 只调用行情接口 <code>reqMktData</code>、<code>cancelMktData</code>、<code>reqHistoricalData</code>、<code>cancelHistoricalData</code>；不调用账户、持仓、订单、成交或下单接口。
+        </p>
+        <div class="button-row ibkr-actions">
+          <button id="testIbkrBtn" type="button" title="只测试行情快照接口，不读取账户、持仓、订单，也不会下单。">测试 IBKR 行情</button>
+          <span id="ibkrTestResult" class="inline-result">未测试</span>
+        </div>
+        <details class="advanced-settings">
+          <summary>高级设置</summary>
+          <div class="ibkr-grid">
+            <label class="field" title="IB Gateway/TWS 所在机器。本机运行通常是 127.0.0.1。">
+              <span>Host <span class="hint" title="IB Gateway/TWS API 地址，通常填 127.0.0.1。">?</span></span>
+              <input id="ibkrHost" type="text" />
+            </label>
+            <label class="field" title="IB Gateway paper 常见 4002，live 常见 4001；TWS paper 常见 7497，live 常见 7496。">
+              <span>端口 <span class="hint" title="Gateway paper 常见 4002；Gateway live 常见 4001；TWS paper 常见 7497。">?</span></span>
+              <input id="ibkrPort" type="number" step="1" />
+            </label>
+            <label class="field" title="API 客户端编号，只要不和其他正在连接的客户端重复即可。">
+              <span>Client ID <span class="hint" title="建议用 81；如果被占用，换一个数字。">?</span></span>
+              <input id="ibkrClientId" type="number" step="1" />
+            </label>
+            <label class="field" title="1=实时，2=冻结，3=延迟，4=延迟冻结。没有订阅实时行情时可用 3 测试。">
+              <span>行情类型 <span class="hint" title="1 实时；3 延迟。没有美股实时订阅时先选 3。">?</span></span>
+              <select id="ibkrMarketDataType">
+                <option value="1">实时行情</option>
+                <option value="2">冻结行情</option>
+                <option value="3">延迟行情</option>
+                <option value="4">延迟冻结</option>
+              </select>
+            </label>
+            <label class="field" title="等待 IBKR 返回快照的秒数。网络慢或标的多时可调大。">
+              <span>超时秒数 <span class="hint" title="每轮等待行情快照的时间。">?</span></span>
+              <input id="ibkrTimeout" type="number" step="0.5" min="1" />
+            </label>
+          </div>
+          <div class="section-head intraday-head">
+            <h2>当日行情</h2>
+            <span class="pill" title="用于捕捉开盘至当前的趋势，不参与任何自动下单。">分钟线评分</span>
+          </div>
+          <div class="ibkr-grid">
+            <label class="toggle" title="打开后每次生成建议都会读取当日分钟线，并计算 VWAP、近 30 分钟和区间位置。">
+              <input id="fetchIntraday" type="checkbox" checked />
+              <span>读取当日分钟线 <span class="hint" title="IBKR 为首选；非 IBKR 行情源会用 Yahoo 兜底。">?</span></span>
+            </label>
+            <label class="field" title="分钟线越细越灵敏，也越慢；5 分钟适合盘中仓位管理。">
+              <span>粒度 <span class="hint" title="默认 5 分钟；极短线可切到 1 分钟。">?</span></span>
+              <select id="intradayBarSize">
+                <option value="1 min">1 分钟</option>
+                <option value="5 mins">5 分钟</option>
+                <option value="15 mins">15 分钟</option>
+                <option value="30 mins">30 分钟</option>
+              </select>
+            </label>
+            <label class="field" title="1 D 通常覆盖最近一个交易日；若盘前也想看，保持扩展时段打开。">
+              <span>范围 <span class="hint" title="IBKR durationStr，默认 1 D。">?</span></span>
+              <input id="intradayDuration" type="text" />
+            </label>
+            <label class="toggle" title="关闭时包含盘前/盘后；打开时只看美股正常交易时段。">
+              <input id="intradayUseRth" type="checkbox" />
+              <span>只看正常时段 <span class="hint" title="关闭更适合盘前/盘后观察流动性。">?</span></span>
+            </label>
+          </div>
+        </details>
+      </section>
+
+      <section class="portfolio-panel">
+        <div class="section-head">
+          <h2>当前持仓</h2>
+          <div class="button-row">
+            <button id="addRowBtn" type="button">加一行</button>
+            <button id="savePortfolioBtn" type="button">保存持仓</button>
+          </div>
+        </div>
+
+        <div class="portfolio-workbench">
+          <div class="account-grid">
+            <label class="field" title="BBAE 当前账户净值/权益，用于计算仓位比例和杠杆。">
+              <span>账户净值 <span class="hint" title="必须手动来自 BBAE；不是从 IBKR 读取。">?</span></span>
+              <input id="accountEquity" type="number" step="0.01" />
+            </label>
+            <label class="field" title="BBAE 当前现金，可为负数。">
+              <span>现金 <span class="hint" title="两倍杠杆时现金可能为负，按 BBAE 当前值填。">?</span></span>
+              <input id="cash" type="number" step="0.01" />
+            </label>
+            <label class="field" title="BBAE 当前融资/借款金额。">
+              <span>融资 <span class="hint" title="用于记录风险，不从 IBKR 读取。">?</span></span>
+              <input id="marginDebit" type="number" step="0.01" />
+            </label>
+            <label class="field" title="BBAE 维持保证金/强平阈值。Agent 用账户净值减它来估算保证金安全垫。">
+              <span>维持保证金 <span class="hint" title="填低于它可能触发强平的维持保证金要求，不是融资借款金额。">?</span></span>
+              <input id="maintenanceMargin" type="number" step="0.01" />
+            </label>
+            <label class="field" title="你希望的大致目标杠杆。Agent 会参考，但风险环境不支持时会截断。">
+              <span>目标杠杆 <span class="hint" title="例如 1.25；这是参考值，不是硬命令。">?</span></span>
+              <input id="targetGrossHint" type="number" step="0.01" min="0" />
+            </label>
+          </div>
+
+          <div class="table-wrap portfolio-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>代码</th>
+                  <th>股数</th>
+                  <th>成本</th>
+                  <th title="基本面逻辑状态，会影响目标权重。">状态</th>
+                  <th title="0 到 1.25，越高目标权重越接近配置上限。">信心</th>
+                  <th title="仓位桶会影响预算倾斜，默认会按核心名单自动推断。">桶</th>
+                  <th title="交易约束是参考项，证据足够时 Agent 可以反驳并写明原因。">约束</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="positionsBody"></tbody>
+            </table>
+          </div>
+
+          <div class="portfolio-text-panel">
+            <div class="import-box">
+              <label class="field">
+                <span>自然语言持仓 <span class="hint" tabindex="0" role="button" aria-label="自然语言持仓说明" title="预留入口：暂未接入 LLM，也暂时禁用。当前请以上方表格为准，避免持仓解析误差。">?</span></span>
+                <textarea id="portfolioText" rows="4" disabled placeholder="例如：账户净值 10万 现金 -6万 融资 6万 维持保证金 6万 目标杠杆 1.3&#10;MU 300股 成本115 核心 不主动卖"></textarea>
+              </label>
+              <p class="field-note">预留入口，暂未启用；当前持仓请用中间表格维护。</p>
+              <button id="parseTextBtn" type="button" disabled title="自然语言持仓解析暂时禁用，后续再接 LLM/规则校验。">暂未启用</button>
+            </div>
+
+            <div class="prompt-box">
+              <label class="field">
+                <span>本次调仓想法 <span class="hint" tabindex="0" role="button" aria-label="本次调仓想法说明" title="会进入本轮决策：先本地解析成软/硬约束和偏置，再传给点位复核 LLM 与重点总结。普通“不主动”是软约束，明确“绝对禁止”才硬拦。">?</span></span>
+                <textarea id="runPrompt" rows="4" placeholder="例如：CPI 前不主动加仓，INTC 只减不加，MU 回踩才加"></textarea>
+              </label>
+              <div id="runProgress" class="run-progress" hidden>
+                <span class="spinner" aria-hidden="true"></span>
+                <span>正在生成调仓建议，请稍等。会拉取行情、计算技术面、合并你的调仓想法并保存记录。</span>
+              </div>
+              <button id="runBtn" class="primary" type="button">生成调仓建议</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="history-panel">
+        <div class="section-head">
+          <h2>跑批记录</h2>
+          <button id="reloadBtn" type="button">刷新</button>
+        </div>
+        <div id="historyList" class="history-list"></div>
+      </aside>
+
+      <section class="result-panel">
+        <div class="section-head">
+          <h2>最新建议</h2>
+          <span id="latestRunTag" class="pill">暂无记录</span>
+        </div>
+
+        <section class="summary-card">
+          <div class="summary-head">
+            <h3>重点总结</h3>
+            <span id="summarySource" class="pill">等待生成</span>
+          </div>
+          <div id="executiveSummary" class="executive-summary muted">暂无总结</div>
+        </section>
+
+        <div class="metrics">
+          <div>
+            <span>市场状态</span>
+            <strong id="metricRegime">-</strong>
+          </div>
+          <div>
+            <span>当前杠杆</span>
+            <strong id="metricGross">-</strong>
+          </div>
+          <div>
+            <span>建议单数</span>
+            <strong id="metricOrders">-</strong>
+          </div>
+          <div>
+            <span>维持/安全垫</span>
+            <strong id="metricMargin">-</strong>
+          </div>
+        </div>
+        <div id="exposureGauge" class="exposure-gauge"></div>
+
+        <h3>建议挂单</h3>
+        <p class="section-note">上方表格给出主建议单；每行里的参考价梯是把同一笔建议拆成 2-3 档的替代方案，不和主建议单叠加。</p>
+        <div class="table-wrap">
+          <table class="orders-table">
+            <thead>
+              <tr>
+                <th>方向</th>
+                <th>代码</th>
+                <th>现价 / 距限价</th>
+                <th>主建议股数</th>
+                <th>主建议限价</th>
+                <th>主建议金额</th>
+                <th>点位依据 / 参考价梯</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody id="ordersBody"></tbody>
+          </table>
+        </div>
+
+        <h3>近期量价点位</h3>
+        <div id="technicalAnalysis" class="technical-analysis"></div>
+
+        <h3>研究过程</h3>
+        <div id="researchProcess" class="research-process"></div>
+
+        <h3>当日趋势</h3>
+        <div id="intradaySummary" class="intraday-summary"></div>
+
+        <h3>持仓差异</h3>
+        <div class="table-wrap compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>代码</th>
+                <th>现价</th>
+                <th>当前权重</th>
+                <th>目标权重</th>
+                <th>差额</th>
+                <th>动作</th>
+                <th>溯源</th>
+              </tr>
+            </thead>
+            <tbody id="positionsPlanBody"></tbody>
+          </table>
+        </div>
+
+        <div id="warnings" class="warnings"></div>
+      </section>
+    </main>
+
+    <div id="researchWindow" class="research-window" hidden>
+      <div id="researchWindowHeader" class="research-window-header">
+        <strong>Agent 研究进度</strong>
+        <button id="researchWindowClose" type="button" title="隐藏进度窗口">收起</button>
+      </div>
+      <div id="progressMeta" class="progress-meta">等待开始</div>
+      <div class="progress-bar"><span id="progressFill"></span></div>
+      <div id="progressScorecard" class="progress-scorecard"></div>
+      <ol id="progressSteps" class="progress-steps"></ol>
+    </div>
+
+    <div id="techModal" class="tech-modal" hidden>
+      <div class="tech-modal-backdrop" data-close-tech-modal></div>
+      <section class="tech-modal-panel" role="dialog" aria-modal="true" aria-labelledby="techModalTitle">
+        <div class="tech-modal-head">
+          <div>
+            <h2 id="techModalTitle">量价大图</h2>
+            <p id="techModalMeta"></p>
+          </div>
+          <button id="techModalClose" type="button" title="关闭">关闭</button>
+        </div>
+        <div id="techModalBody" class="tech-modal-body"></div>
+      </section>
+    </div>
+    <div id="helpPopover" class="help-popover" hidden></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

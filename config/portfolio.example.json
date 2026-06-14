@@ -1,0 +1,38 @@
+{
+  "asof": "2026-06-11T09:30:00-04:00",
+  "account_equity": 100000.0,
+  "cash": -60000.0,
+  "margin_debit": 60000.0,
+  "positions": {
+    "MU": {
+      "shares": 300,
+      "avg_cost": 115.0,
+      "thesis_status": "intact",
+      "conviction": 1.0
+    },
+    "AAOI": {
+      "shares": 500,
+      "avg_cost": 20.0,
+      "thesis_status": "intact",
+      "conviction": 0.85
+    },
+    "INTC": {
+      "shares": 400,
+      "avg_cost": 31.0,
+      "thesis_status": "watch",
+      "conviction": 0.55
+    },
+    "LITE": {
+      "shares": 180,
+      "avg_cost": 65.0,
+      "thesis_status": "intact",
+      "conviction": 0.9
+    },
+    "MRVL": {
+      "shares": 220,
+      "avg_cost": 78.0,
+      "thesis_status": "intact",
+      "conviction": 0.9
+    }
+  }
+}
