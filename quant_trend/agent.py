@@ -2020,10 +2020,17 @@ def build_trade_plan(
 
         buy_shares = 0 if no_add or not buy_price else int(trade_value // buy_price)
         sell_shares = 0 if no_reduce or shares_held <= 0 or not sell_price else min(int(trade_value // sell_price), shares_held)
-        if flat_intent and buy_shares and sell_shares:
-            paired_shares = min(buy_shares, sell_shares)
-            buy_shares = paired_shares
-            sell_shares = paired_shares
+        if flat_intent:
+            if buy_shares > 0 and sell_shares == 0 and not no_reduce and shares_held > 0 and sell_price:
+                sell_shares = min(buy_shares, shares_held)
+            if sell_shares > 0 and buy_shares == 0 and not no_add and buy_price:
+                candidate_buy_notional = sell_shares * buy_price
+                if margin_buy_budget is None or candidate_buy_notional <= remaining_buy_value:
+                    buy_shares = sell_shares
+            if buy_shares and sell_shares:
+                paired_shares = min(buy_shares, sell_shares)
+                buy_shares = paired_shares
+                sell_shares = paired_shares
 
         group_id = f"range_trade:{symbol}"
         group_reason = ["range_trade_prompt"]
