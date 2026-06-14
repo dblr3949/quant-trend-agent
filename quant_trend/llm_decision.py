@@ -167,6 +167,19 @@ def _apply_gpt5_options(body: dict, kind: str, default_effort: str, default_verb
     return body
 
 
+def _extract_openai_usage(payload: dict) -> dict:
+    usage = payload.get("usage") or {}
+    input_details = usage.get("input_tokens_details") or {}
+    output_details = usage.get("output_tokens_details") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "cached_input_tokens": int(input_details.get("cached_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "reasoning_tokens": int(output_details.get("reasoning_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
+
+
 def _call_openai_decisions(compact: dict) -> dict | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key or not compact.get("orders"):
@@ -192,8 +205,8 @@ def _call_openai_decisions(compact: dict) -> dict | None:
             {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
         ],
         "temperature": 0.1,
-        "max_output_tokens": 1800,
-    }, "DECISION", "xhigh", "low")
+        "max_output_tokens": 4096,
+    }, "DECISION", "medium", "low")
     request = Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(body).encode("utf-8"),
@@ -203,7 +216,8 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         },
         method="POST",
     )
-    with urlopen(request, timeout=35, context=_openai_ssl_context()) as response:
+    timeout = float(os.getenv("OPENAI_DECISION_TIMEOUT_SECONDS", "120"))
+    with urlopen(request, timeout=timeout, context=_openai_ssl_context()) as response:
         payload = json.loads(response.read().decode("utf-8"))
     text = str(payload.get("output_text") or "")
     if not text:
@@ -213,7 +227,17 @@ def _call_openai_decisions(compact: dict) -> dict | None:
                 if content.get("type") in {"output_text", "text"} and content.get("text"):
                     chunks.append(str(content["text"]))
         text = "\n".join(chunks)
-    return _extract_json(text) if text else None
+    if not text:
+        return {
+            "_openai_model": model,
+            "_openai_usage": _extract_openai_usage(payload),
+            "_openai_error": "empty_output",
+            "decisions": [],
+        }
+    parsed = _extract_json(text)
+    parsed["_openai_model"] = model
+    parsed["_openai_usage"] = _extract_openai_usage(payload)
+    return parsed
 
 
 def _side_price_valid(side: str, price: float, reference: float, bounds: tuple[float, float]) -> bool:
@@ -332,11 +356,25 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
     if not payload:
         return None
 
+    usage = payload.pop("_openai_usage", None) if isinstance(payload, dict) else None
+    model = payload.pop("_openai_model", None) if isinstance(payload, dict) else None
+    error = payload.pop("_openai_error", None) if isinstance(payload, dict) else None
     decisions = payload.get("decisions") if isinstance(payload, dict) else None
     if not isinstance(decisions, list):
         return {
             "asof": datetime.now(timezone.utc).isoformat(),
             "source": "llm_invalid",
+            "model": model,
+            "usage": usage,
+            "applied": [],
+        }
+    if error and not decisions:
+        return {
+            "asof": datetime.now(timezone.utc).isoformat(),
+            "source": "llm_empty_output",
+            "model": model,
+            "usage": usage,
+            "error": error,
             "applied": [],
         }
 
@@ -423,6 +461,8 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
     return {
         "asof": datetime.now(timezone.utc).isoformat(),
         "source": "llm_candidate_selector",
+        "model": model,
+        "usage": usage,
         "applied": applied,
         "ladders": ladders,
     }

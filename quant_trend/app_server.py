@@ -71,6 +71,37 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _collect_llm_usage(plan: dict) -> dict:
+    calls = []
+    for name, payload in [
+        ("limit_decision", plan.get("llm_limit_decisions") or {}),
+        ("executive_summary", plan.get("executive_summary") or {}),
+    ]:
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if not usage:
+            continue
+        calls.append(
+            {
+                "name": name,
+                "source": payload.get("source"),
+                "model": payload.get("model"),
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "cached_input_tokens": int(usage.get("cached_input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "reasoning_tokens": int(usage.get("reasoning_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+            }
+        )
+    totals = {
+        "input_tokens": sum(item["input_tokens"] for item in calls),
+        "cached_input_tokens": sum(item["cached_input_tokens"] for item in calls),
+        "output_tokens": sum(item["output_tokens"] for item in calls),
+        "reasoning_tokens": sum(item["reasoning_tokens"] for item in calls),
+        "total_tokens": sum(item["total_tokens"] for item in calls),
+    }
+    return {"calls": calls, "totals": totals}
+
+
 def _read_json(path: Path, default):
     if not path.exists():
         return default
@@ -691,6 +722,7 @@ class AgentApp:
                     self._progress_step("LLM 点位复核跳过", "未配置 LLM 或本轮没有候选挂单，保留后端确定性点位。", {"采用点位": 0})
                 self._progress_step("生成重点总结", "把量价点位、当日趋势、仓位约束和弱覆盖因子交给 LLM，生成 500 字内中文摘要。", {"状态": "开始"})
                 plan["executive_summary"] = build_executive_summary(plan)
+                plan["llm_usage"] = _collect_llm_usage(plan)
                 self._progress_step("保存记录", f"准备保存到 {path.name}。", {"建议单数": len(plan.get("orders", []))})
                 progress = self.get_progress()
                 plan["research_process"] = {

@@ -298,7 +298,20 @@ def _apply_gpt5_options(body: dict, kind: str, default_effort: str, default_verb
     return body
 
 
-def _call_openai_summary(compact: dict) -> str | None:
+def _extract_openai_usage(payload: dict) -> dict:
+    usage = payload.get("usage") or {}
+    input_details = usage.get("input_tokens_details") or {}
+    output_details = usage.get("output_tokens_details") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "cached_input_tokens": int(input_details.get("cached_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "reasoning_tokens": int(output_details.get("reasoning_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
+
+
+def _call_openai_summary(compact: dict) -> dict | None:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
@@ -341,26 +354,43 @@ def _call_openai_summary(compact: dict) -> str | None:
     with urlopen(request, timeout=timeout, context=context) as response:
         payload = json.loads(response.read().decode("utf-8"))
     text = _extract_openai_text(payload)
-    return text.strip() if text else None
+    if not text:
+        return None
+    return {
+        "model": model,
+        "text": text.strip(),
+        "usage": _extract_openai_usage(payload),
+    }
 
 
 def build_executive_summary(plan: dict) -> dict:
     fallback = _fallback_summary(plan)
     compact = _compact_plan(plan)
     try:
-        text = _call_openai_summary(compact)
+        result = _call_openai_summary(compact)
     except Exception as exc:
         fallback["error"] = str(exc)
         return fallback
+    usage = None
+    model = None
+    text = result
+    if isinstance(result, dict):
+        usage = result.get("usage")
+        model = result.get("model")
+        text = result.get("text")
     if not text:
         return fallback
     if _has_denominator_score_format(text):
         fallback["error"] = "LLM summary used denominator-style score formatting; local formatted fallback was used."
+        fallback["model"] = model
+        fallback["usage"] = usage
         return fallback
     text, source = _ensure_symbol_coverage(text, fallback, compact)
     return {
         "asof": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        "model": model,
+        "usage": usage,
         "text": text,
         "paragraphs": [{"symbol": item.get("symbol"), "text": ""} for item in compact.get("positions", [])],
     }

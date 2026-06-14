@@ -5,11 +5,11 @@ from quant_trend.llm_decision import _apply_gpt5_options, apply_llm_limit_decisi
 
 
 class LlmDecisionTests(unittest.TestCase):
-    def test_gpt5_decision_request_uses_xhigh_reasoning(self):
-        body = _apply_gpt5_options({"model": "gpt-5.5", "temperature": 0.1}, "DECISION", "xhigh", "low")
+    def test_gpt5_decision_request_uses_medium_reasoning(self):
+        body = _apply_gpt5_options({"model": "gpt-5.5", "temperature": 0.1}, "DECISION", "medium", "low")
 
         self.assertNotIn("temperature", body)
-        self.assertEqual(body["reasoning"]["effort"], "xhigh")
+        self.assertEqual(body["reasoning"]["effort"], "medium")
         self.assertEqual(body["text"]["verbosity"], "low")
 
     def test_prompt_context_is_sent_to_decision_llm(self):
