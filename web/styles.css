@@ -67,24 +67,120 @@ button:disabled {
 }
 
 .login-screen {
+  position: relative;
+  overflow: hidden;
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 28px;
+  isolation: isolate;
   background:
-    linear-gradient(145deg, rgba(15, 107, 95, 0.12), rgba(42, 69, 96, 0.08) 44%, rgba(180, 55, 55, 0.07)),
-    #f4f7fa;
+    radial-gradient(circle at 50% -18%, rgba(52, 211, 229, 0.28), transparent 32%),
+    linear-gradient(135deg, #04080f 0%, #071521 45%, #04110f 100%);
+}
+
+.login-screen::before {
+  content: "";
+  position: absolute;
+  inset: -24px;
+  z-index: -2;
+  opacity: 0.42;
+  background-image:
+    linear-gradient(30deg, rgba(53, 224, 205, 0.22) 12%, transparent 12.5%, transparent 87%, rgba(53, 224, 205, 0.22) 87.5%, rgba(53, 224, 205, 0.22)),
+    linear-gradient(150deg, rgba(53, 224, 205, 0.22) 12%, transparent 12.5%, transparent 87%, rgba(53, 224, 205, 0.22) 87.5%, rgba(53, 224, 205, 0.22)),
+    linear-gradient(30deg, rgba(53, 224, 205, 0.16) 12%, transparent 12.5%, transparent 87%, rgba(53, 224, 205, 0.16) 87.5%, rgba(53, 224, 205, 0.16)),
+    linear-gradient(150deg, rgba(53, 224, 205, 0.16) 12%, transparent 12.5%, transparent 87%, rgba(53, 224, 205, 0.16) 87.5%, rgba(53, 224, 205, 0.16)),
+    linear-gradient(60deg, rgba(80, 160, 255, 0.16) 25%, transparent 25.5%, transparent 75%, rgba(80, 160, 255, 0.16) 75%, rgba(80, 160, 255, 0.16));
+  background-position:
+    0 0,
+    0 0,
+    28px 48px,
+    28px 48px,
+    0 0;
+  background-size: 56px 96px;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 80%, transparent 100%);
+}
+
+.login-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(90deg, transparent 0 8%, rgba(45, 212, 191, 0.14) 8.2%, transparent 8.6% 48%, rgba(59, 130, 246, 0.12) 48.3%, transparent 48.9% 100%),
+    repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 8px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.52));
+  mix-blend-mode: screen;
+  pointer-events: none;
 }
 
 .login-card {
+  position: relative;
   width: min(420px, 100%);
   display: grid;
   gap: 14px;
-  border: 1px solid #cad5df;
+  border: 1px solid rgba(125, 249, 232, 0.42);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 22px 70px rgba(22, 32, 42, 0.14);
-  padding: 26px;
+  background:
+    linear-gradient(180deg, rgba(9, 21, 34, 0.92), rgba(5, 14, 24, 0.94)),
+    rgba(7, 18, 31, 0.96);
+  box-shadow:
+    0 26px 80px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(84, 191, 255, 0.08),
+    0 0 42px rgba(45, 212, 191, 0.18);
+  padding: 30px;
+  color: #ecfeff;
+  backdrop-filter: blur(18px);
+}
+
+.login-card::before,
+.login-card::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.login-card::before {
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(94, 234, 212, 0.88), rgba(59, 130, 246, 0.34) 45%, rgba(248, 113, 113, 0.36));
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.login-card::after {
+  top: 0;
+  left: 18px;
+  right: 18px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(103, 232, 249, 0.9), transparent);
+  box-shadow: 0 0 18px rgba(45, 212, 191, 0.75);
+}
+
+.login-emblem {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 3px;
+  border: 1px solid rgba(94, 234, 212, 0.52);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(13, 148, 136, 0.28), rgba(30, 64, 175, 0.28)),
+    rgba(4, 16, 26, 0.72);
+  box-shadow: inset 0 0 22px rgba(45, 212, 191, 0.2), 0 0 22px rgba(37, 99, 235, 0.2);
+  transform: skew(-6deg);
+}
+
+.login-emblem span {
+  width: 28px;
+  height: 28px;
+  border: 2px solid #67e8f9;
+  border-left-color: #34d399;
+  border-bottom-color: rgba(248, 113, 113, 0.85);
+  clip-path: polygon(50% 0, 100% 28%, 100% 72%, 50% 100%, 0 72%, 0 28%);
+  box-shadow: 0 0 16px rgba(103, 232, 249, 0.65);
 }
 
 .login-brand {
@@ -94,30 +190,63 @@ button:disabled {
 }
 
 .login-brand span {
-  color: var(--accent-strong);
+  color: #5eead4;
   font-size: 12px;
   font-weight: 750;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  text-shadow: 0 0 14px rgba(94, 234, 212, 0.45);
 }
 
 .login-brand h1 {
-  font-size: 26px;
+  color: #f8fafc;
+  font-size: 28px;
   line-height: 1.15;
+  text-shadow: 0 0 28px rgba(103, 232, 249, 0.22);
 }
 
 .login-brand p {
-  color: var(--muted);
+  color: #a8bdc8;
   line-height: 1.55;
 }
 
-.login-button {
+.login-card .field > span {
+  color: #8edfd8;
+}
+
+.login-card input {
+  border-color: rgba(125, 249, 232, 0.24);
+  background: rgba(2, 8, 15, 0.72);
+  color: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.05);
+}
+
+.login-card input::placeholder {
+  color: #637887;
+}
+
+.login-card input:focus {
+  border-color: #67e8f9;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.16), inset 0 0 18px rgba(45, 212, 191, 0.08);
+}
+
+.login-card button.login-button {
   min-height: 40px;
+  border: 1px solid rgba(94, 234, 212, 0.66);
+  background: linear-gradient(135deg, #0f766e, #0891b2 54%, #2563eb);
+  box-shadow: 0 12px 30px rgba(8, 145, 178, 0.24), 0 0 22px rgba(20, 184, 166, 0.22);
+  text-shadow: 0 1px 10px rgba(255, 255, 255, 0.22);
+}
+
+.login-card button.login-button:hover {
+  border-color: #a7f3d0;
+  background: linear-gradient(135deg, #0d9488, #06b6d4 54%, #3b82f6);
 }
 
 .login-message {
   min-height: 20px;
-  color: var(--danger);
+  color: #fca5a5;
   line-height: 1.45;
 }
 
