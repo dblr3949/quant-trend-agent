@@ -9,6 +9,7 @@ from unittest.mock import patch
 from quant_trend.agent import _current_market_snapshot_label
 from quant_trend.app_server import DEFAULT_SETTINGS, AgentApp, _latest_expected_us_daily_date
 from quant_trend.market_data import Quote
+from quant_trend.user_store import UserStore
 
 
 class AppServerTests(unittest.TestCase):
@@ -27,6 +28,44 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(app.storage_root, storage.resolve())
         self.assertEqual(app.state_path, storage.resolve() / "state" / "agent_app_state.json")
         self.assertEqual(app.data_dir, storage.resolve() / "data")
+
+    def test_user_store_sessions_can_be_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UserStore(Path(tmp) / "agent.db")
+            user = store.upsert_user("gengqin", "985211", "gengqin", True)
+            token = store.create_session(user["id"])
+
+            self.assertEqual(store.get_session_user(token)["username"], "gengqin")
+
+            store.delete_session(token)
+
+            self.assertIsNone(store.get_session_user(token))
+
+    def test_user_mode_keeps_portfolio_state_per_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "app"
+            storage = Path(tmp) / "storage"
+            root.mkdir()
+            env = {
+                "APP_AUTH_MODE": "users",
+                "APP_SEED_USERS": "gengqin:985211:gengqin:admin",
+                "APP_DATA_DIR": str(storage),
+            }
+            with patch.dict(os.environ, env):
+                app = AgentApp(root)
+                first = app.user_store.authenticate("gengqin", "985211")
+                second = app.user_store.upsert_user("second", "pw", "second", False)
+                portfolio = {
+                    "account_equity": 100000,
+                    "cash": -20000,
+                    "positions": {"MU": {"shares": 10, "avg_cost": 100}},
+                }
+
+                app.save_portfolio_payload(portfolio, user_id=first["id"])
+
+                self.assertEqual(app.load_state(user_id=first["id"])["portfolio"]["positions"]["MU"]["shares"], 10)
+                self.assertNotIn("portfolio", app.load_state(user_id=second["id"]))
+                self.assertFalse((storage / "config" / "portfolio.json").exists())
 
     def test_fetch_quotes_uses_massive_without_falling_through(self):
         class FakeMassiveClient:

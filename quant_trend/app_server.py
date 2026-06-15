@@ -8,6 +8,7 @@ import threading
 import time
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -29,6 +30,7 @@ from .portfolio import Portfolio, Position, portfolio_from_dict, portfolio_to_di
 from .portfolio_input import portfolio_from_text
 from .plan_summary import build_executive_summary
 from .prompt_overlay import merge_research_overlays, overlay_from_prompt
+from .user_store import SESSION_DAYS, UserStore, auth_mode_enabled
 
 try:
     from zoneinfo import ZoneInfo
@@ -220,14 +222,24 @@ class AgentApp:
         self.root = Path(root)
         self.storage_root = _storage_root(self.root)
         self.storage_root.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.storage_root / APP_STATE
-        self.runs_dir = self.storage_root / RUNS_DIR
+        self.legacy_state_path = self.storage_root / APP_STATE
+        self.legacy_runs_dir = self.storage_root / RUNS_DIR
+        self.legacy_portfolio_path = self.storage_root / "config/portfolio.json"
+        self.state_path = self.legacy_state_path
+        self.runs_dir = self.legacy_runs_dir
         self.config_path = self.root / "config/agent_config.json"
-        self.portfolio_path = self.storage_root / "config/portfolio.json"
+        self.portfolio_path = self.legacy_portfolio_path
         self.quotes_path = self.storage_root / "data/live_quotes.json"
         self.research_path = self.storage_root / "data/research_overlay.json"
         self.data_dir = self.storage_root / "data"
         self.web_dir = self.root / "web"
+        self.user_store = UserStore(self.storage_root / "state/agent.db") if auth_mode_enabled() else None
+        if self.user_store:
+            seeded_users = self.user_store.seed_from_env()
+            users = seeded_users or self.user_store.list_users()
+            if users:
+                self.user_store.migrate_legacy(users[0]["id"], self.legacy_state_path, self.legacy_portfolio_path, self.legacy_runs_dir)
+            self.user_store.cleanup_sessions()
         self.lock = threading.Lock()
         self.run_lock = threading.Lock()
         self.progress_lock = threading.Lock()
@@ -243,22 +255,30 @@ class AgentApp:
             "error": None,
         }
 
-    def load_state(self) -> dict:
-        state = _read_json(self.state_path, {})
+    def load_state(self, user_id: int | None = None) -> dict:
+        if self.user_store and user_id is not None:
+            state = self.user_store.load_state(user_id) or {}
+        else:
+            state = _read_json(self.state_path, {})
         state.setdefault("settings", DEFAULT_SETTINGS.copy())
         state["settings"] = {**DEFAULT_SETTINGS, **state.get("settings", {})}
         state.setdefault("last_schedule_runs", {})
-        if "portfolio" not in state and self.portfolio_path.exists():
+        if not self.user_store and "portfolio" not in state and self.portfolio_path.exists():
             try:
                 state["portfolio"] = portfolio_to_dict(portfolio_from_dict(_read_json(self.portfolio_path, {})))
             except Exception:
                 pass
         return state
 
-    def save_state(self, state: dict) -> None:
+    def save_state(self, state: dict, user_id: int | None = None) -> None:
+        if self.user_store and user_id is not None:
+            self.user_store.save_state(user_id, state)
+            return
         _write_json(self.state_path, state)
 
-    def list_runs(self, limit: int = 50) -> list[dict]:
+    def list_runs(self, limit: int = 50, user_id: int | None = None) -> list[dict]:
+        if self.user_store and user_id is not None:
+            return self.user_store.list_runs(user_id, limit)
         if not self.runs_dir.exists():
             return []
         items = []
@@ -288,19 +308,24 @@ class AgentApp:
                 break
         return items
 
-    def load_run(self, run_id: str) -> dict:
+    def load_run(self, run_id: str, user_id: int | None = None) -> dict:
         safe_id = "".join(ch for ch in run_id if ch.isalnum() or ch in {"_", "-"})
+        if self.user_store and user_id is not None:
+            run = self.user_store.load_run(user_id, safe_id)
+            if run is None:
+                raise FileNotFoundError(run_id)
+            return run
         path = self.runs_dir / f"{safe_id}.json"
         if not path.exists():
             raise FileNotFoundError(run_id)
         return _read_json(path, {})
 
-    def latest_run(self) -> dict | None:
-        runs = self.list_runs(1)
-        return self.load_run(runs[0]["id"]) if runs else None
+    def latest_run(self, user_id: int | None = None) -> dict | None:
+        runs = self.list_runs(1, user_id=user_id)
+        return self.load_run(runs[0]["id"], user_id=user_id) if runs else None
 
-    def compare_previous(self, portfolio: Portfolio) -> dict:
-        previous = self.latest_run()
+    def compare_previous(self, portfolio: Portfolio, user_id: int | None = None) -> dict:
+        previous = self.latest_run(user_id=user_id)
         if not previous:
             return {"previous_run_id": None, "position_changes": []}
         previous_portfolio = previous.get("input_portfolio", {}).get("positions", {})
@@ -451,22 +476,23 @@ class AgentApp:
 
         return {}, [f"{provider} 暂未接入当日分钟线"]
 
-    def save_portfolio_payload(self, payload: dict) -> dict:
+    def save_portfolio_payload(self, payload: dict, user_id: int | None = None) -> dict:
         portfolio = portfolio_from_dict(payload)
         data = portfolio_to_dict(portfolio)
-        save_portfolio(self.portfolio_path, portfolio)
-        state = self.load_state()
+        if not self.user_store:
+            save_portfolio(self.portfolio_path, portfolio)
+        state = self.load_state(user_id=user_id)
         state["portfolio"] = data
         state["updated_at"] = _now_iso()
-        self.save_state(state)
+        self.save_state(state, user_id=user_id)
         return data
 
-    def parse_portfolio_text(self, text: str) -> dict:
+    def parse_portfolio_text(self, text: str, user_id: int | None = None) -> dict:
         portfolio = portfolio_from_text(text)
-        return self.save_portfolio_payload(portfolio_to_dict(portfolio))
+        return self.save_portfolio_payload(portfolio_to_dict(portfolio), user_id=user_id)
 
-    def test_quotes(self, payload: dict) -> dict:
-        state = self.load_state()
+    def test_quotes(self, payload: dict, user_id: int | None = None) -> dict:
+        state = self.load_state(user_id=user_id)
         settings = {**state.get("settings", {}), **payload.get("settings", {})}
         provider = payload.get("provider") or settings.get("provider", "massive")
         config = load_agent_config(self.config_path)
@@ -489,12 +515,13 @@ class AgentApp:
             "missing": sorted(set(symbols) - set(quotes)),
         }
 
-    def _start_progress(self, run_id: str, kind: str, prompt: str) -> None:
+    def _start_progress(self, run_id: str, kind: str, prompt: str, user_id: int | None = None) -> None:
         with self.progress_lock:
             self.progress = {
                 "active": True,
                 "status": "running",
                 "run_id": run_id,
+                "user_id": user_id,
                 "kind": kind,
                 "prompt": prompt,
                 "started_at": _now_iso(),
@@ -530,9 +557,22 @@ class AgentApp:
             self.progress["error"] = error
             self.progress["updated_at"] = _now_iso()
 
-    def get_progress(self) -> dict:
+    def get_progress(self, user_id: int | None = None) -> dict:
         with self.progress_lock:
-            return copy.deepcopy(self.progress)
+            progress = copy.deepcopy(self.progress)
+        if self.user_store and user_id is not None and progress.get("user_id") not in (None, user_id):
+            return {
+                "active": False,
+                "status": "idle",
+                "run_id": None,
+                "kind": None,
+                "started_at": None,
+                "updated_at": None,
+                "steps": [],
+                "scorecard": {},
+                "error": None,
+            }
+        return progress
 
     def _build_scorecard(self, plan: dict, research: dict) -> dict:
         positions = plan.get("positions", [])
@@ -675,16 +715,16 @@ class AgentApp:
             },
         ]
 
-    def run_plan(self, payload: dict, kind: str = "manual") -> dict:
+    def run_plan(self, payload: dict, kind: str = "manual", user_id: int | None = None) -> dict:
         if not self.run_lock.acquire(blocking=False):
             raise RuntimeError("已有一轮建议正在生成，请等待完成后再触发。")
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         prompt = str(payload.get("prompt") or "")
-        self._start_progress(run_id, kind, prompt)
+        self._start_progress(run_id, kind, prompt, user_id=user_id)
         try:
             with self.lock:
                 self._progress_step("读取持仓", "读取网页表格里的 BBAE 持仓；不会读取任何券商账户。", {"边界": "只用本地持仓"})
-                state = self.load_state()
+                state = self.load_state(user_id=user_id)
                 portfolio_payload = payload.get("portfolio") or state.get("portfolio")
                 if not portfolio_payload:
                     raise ValueError("Missing portfolio. Save positions first.")
@@ -760,11 +800,11 @@ class AgentApp:
                     "created_at": _now_iso(),
                 }
                 plan["input_portfolio"] = portfolio_to_dict(portfolio)
-                plan["history_context"] = self.compare_previous(portfolio)
+                plan["history_context"] = self.compare_previous(portfolio, user_id=user_id)
                 plan["data_warnings"] = history_warnings + intraday_warnings + plan.get("data_warnings", [])
                 plan["decision_context"] = self._decision_factors(plan, research, prompt, provider)
                 path = self.runs_dir / f"{run_id}.json"
-                current_progress = self.get_progress()
+                current_progress = self.get_progress(user_id=user_id)
                 plan["research_process"] = {
                     "run_id": run_id,
                     "started_at": current_progress.get("started_at"),
@@ -790,7 +830,7 @@ class AgentApp:
                 plan["executive_summary"] = build_executive_summary(plan, model=llm_model)
                 plan["llm_usage"] = _collect_llm_usage(plan)
                 self._progress_step("保存记录", f"准备保存到 {path.name}。", {"建议单数": len(plan.get("orders", []))})
-                progress = self.get_progress()
+                progress = self.get_progress(user_id=user_id)
                 plan["research_process"] = {
                     "run_id": run_id,
                     "started_at": progress.get("started_at"),
@@ -800,12 +840,15 @@ class AgentApp:
                     "sources": self._research_sources(provider, settings, prompt, len(intraday_bars)),
                     "decision_factors": plan["decision_context"],
                 }
-                _write_json(path, plan)
-                self.save_portfolio_payload(portfolio_to_dict(portfolio))
-                state = self.load_state()
+                if self.user_store and user_id is not None:
+                    self.user_store.save_run(user_id, run_id, plan)
+                else:
+                    _write_json(path, plan)
+                self.save_portfolio_payload(portfolio_to_dict(portfolio), user_id=user_id)
+                state = self.load_state(user_id=user_id)
                 state["latest_run_id"] = run_id
                 state["settings"] = settings
-                self.save_state(state)
+                self.save_state(state, user_id=user_id)
                 self._finish_progress("done")
                 return plan
         except Exception as exc:
@@ -818,28 +861,37 @@ class AgentApp:
     def scheduler_loop(self) -> None:
         while True:
             try:
-                state = self.load_state()
-                settings = state.get("settings", {})
-                if settings.get("schedule_enabled") and state.get("portfolio"):
-                    tz_name = settings.get("timezone", "Asia/Shanghai")
-                    tz = ZoneInfo(tz_name) if ZoneInfo else None
-                    now = datetime.now(tz) if tz else datetime.now()
-                    today = now.date().isoformat()
-                    for item in settings.get("schedule_times", []):
-                        label = item.get("label", "scheduled")
-                        schedule_time = item.get("time", "")
-                        key = f"{today}:{label}:{schedule_time}"
-                        if now.strftime("%H:%M") == schedule_time and key not in state.get("last_schedule_runs", {}):
-                            plan = self.run_plan({"portfolio": state["portfolio"], "prompt": f"scheduled {label}", "settings": settings}, kind=label)
-                            state = self.load_state()
-                            state.setdefault("last_schedule_runs", {})[key] = plan["run"]["id"]
-                            self.save_state(state)
+                if self.user_store:
+                    for user in self.user_store.list_users():
+                        self._run_scheduled_for_user(user["id"])
+                else:
+                    self._run_scheduled_for_user(None)
                 time.sleep(30)
             except Exception as exc:
                 state = self.load_state()
                 state["last_scheduler_error"] = {"time": _now_iso(), "error": str(exc)}
                 self.save_state(state)
                 time.sleep(60)
+
+    def _run_scheduled_for_user(self, user_id: int | None) -> None:
+        state = self.load_state(user_id=user_id)
+        settings = state.get("settings", {})
+        if not settings.get("schedule_enabled") or not state.get("portfolio"):
+            return
+        tz_name = settings.get("timezone", "Asia/Shanghai")
+        tz = ZoneInfo(tz_name) if ZoneInfo else None
+        now = datetime.now(tz) if tz else datetime.now()
+        today = now.date().isoformat()
+        for item in settings.get("schedule_times", []):
+            label = item.get("label", "scheduled")
+            schedule_time = item.get("time", "")
+            key = f"{today}:{label}:{schedule_time}"
+            if now.strftime("%H:%M") != schedule_time or key in state.get("last_schedule_runs", {}):
+                continue
+            plan = self.run_plan({"portfolio": state["portfolio"], "prompt": f"scheduled {label}", "settings": settings}, kind=label, user_id=user_id)
+            state = self.load_state(user_id=user_id)
+            state.setdefault("last_schedule_runs", {})[key] = plan["run"]["id"]
+            self.save_state(state, user_id=user_id)
 
 
 def make_handler(app: AgentApp):
@@ -848,6 +900,8 @@ def make_handler(app: AgentApp):
             return
 
         def _authorized(self) -> bool:
+            if app.user_store:
+                return True
             expected_password = os.getenv("APP_PASSWORD")
             if not expected_password:
                 return True
@@ -864,6 +918,51 @@ def make_handler(app: AgentApp):
             expected_username = os.getenv("APP_USERNAME", "agent")
             return hmac.compare_digest(username, expected_username) and hmac.compare_digest(password, expected_password)
 
+        def _cookie(self, name: str) -> str | None:
+            raw = self.headers.get("Cookie", "")
+            if not raw:
+                return None
+            try:
+                cookie = SimpleCookie(raw)
+            except Exception:
+                return None
+            morsel = cookie.get(name)
+            return morsel.value if morsel else None
+
+        def _session_token(self) -> str | None:
+            return self._cookie("agent_session")
+
+        def _current_user(self) -> dict | None:
+            if not app.user_store:
+                return None
+            return app.user_store.get_session_user(self._session_token())
+
+        def _cookie_secure_enabled(self) -> bool:
+            raw = os.getenv("APP_COOKIE_SECURE", "").strip().lower()
+            if raw in {"1", "true", "yes", "on"}:
+                return True
+            if raw in {"0", "false", "no", "off"}:
+                return False
+            return self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower() == "https"
+
+        def _session_cookie_header(self, token: str) -> str:
+            parts = [
+                f"agent_session={token}",
+                "Path=/",
+                f"Max-Age={SESSION_DAYS * 86400}",
+                "HttpOnly",
+                "SameSite=Lax",
+            ]
+            if self._cookie_secure_enabled():
+                parts.append("Secure")
+            return "; ".join(parts)
+
+        def _clear_cookie_header(self) -> str:
+            parts = ["agent_session=", "Path=/", "Max-Age=0", "HttpOnly", "SameSite=Lax"]
+            if self._cookie_secure_enabled():
+                parts.append("Secure")
+            return "; ".join(parts)
+
         def _auth_challenge(self):
             body = b"Authentication required"
             self.send_response(401)
@@ -873,10 +972,12 @@ def make_handler(app: AgentApp):
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, payload, status: int = 200):
+        def _json(self, payload, status: int = 200, headers: list[tuple[str, str]] | None = None):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            for key, value in headers or []:
+                self.send_header(key, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -894,70 +995,120 @@ def make_handler(app: AgentApp):
                 return {}
             return json.loads(self.rfile.read(length).decode("utf-8"))
 
+        def _public_file_response(self, path: str) -> bool:
+            if path == "/":
+                file = app.web_dir / "index.html"
+            elif path.startswith("/static/"):
+                file = app.web_dir / path.removeprefix("/static/")
+            else:
+                return False
+            if not file.exists():
+                self._json({"error": f"missing {file}"}, 404)
+                return True
+            content_type = "text/html; charset=utf-8"
+            if file.suffix == ".js":
+                content_type = "application/javascript; charset=utf-8"
+            elif file.suffix == ".css":
+                content_type = "text/css; charset=utf-8"
+            self._text(file.read_bytes(), content_type)
+            return True
+
+        def _require_user(self) -> dict | None:
+            user = self._current_user()
+            if user:
+                return user
+            self._json({"error": "unauthorized"}, 401)
+            return None
+
         def do_GET(self):  # noqa: N802
             parsed = urlparse(self.path)
             path = parsed.path
             try:
                 if path == "/healthz":
-                    self._json({"ok": True, "storage_root": str(app.storage_root), "auth": bool(os.getenv("APP_PASSWORD"))})
+                    self._json(
+                        {
+                            "ok": True,
+                            "storage_root": str(app.storage_root),
+                            "auth": "users" if app.user_store else ("basic" if os.getenv("APP_PASSWORD") else "none"),
+                        }
+                    )
+                    return
+                if app.user_store and path == "/api/session":
+                    user = self._current_user()
+                    self._json({"authenticated": bool(user), "user": user})
+                    return
+                if app.user_store and self._public_file_response(path):
                     return
                 if not self._authorized():
                     self._auth_challenge()
                     return
+                if path == "/api/session":
+                    self._json({"authenticated": True, "user": None})
+                    return
+                user = self._require_user() if app.user_store and path.startswith("/api/") else None
+                if app.user_store and path.startswith("/api/") and not user:
+                    return
                 if path == "/api/state":
-                    state = app.load_state()
-                    latest = app.latest_run()
-                    self._json({"state": state, "runs": app.list_runs(), "latest_run": latest})
+                    user_id = user["id"] if user else None
+                    state = app.load_state(user_id=user_id)
+                    latest = app.latest_run(user_id=user_id)
+                    self._json({"state": state, "runs": app.list_runs(user_id=user_id), "latest_run": latest})
                     return
                 if path == "/api/progress":
-                    self._json({"progress": app.get_progress()})
+                    user_id = user["id"] if user else None
+                    self._json({"progress": app.get_progress(user_id=user_id)})
                     return
                 if path.startswith("/api/runs/"):
+                    user_id = user["id"] if user else None
                     run_id = unquote(path.rsplit("/", 1)[-1])
-                    self._json(app.load_run(run_id))
+                    self._json(app.load_run(run_id, user_id=user_id))
                     return
-                if path == "/":
-                    file = app.web_dir / "index.html"
-                elif path.startswith("/static/"):
-                    file = app.web_dir / path.removeprefix("/static/")
-                else:
-                    self._json({"error": "not found"}, 404)
+                if self._public_file_response(path):
                     return
-                if not file.exists():
-                    self._json({"error": f"missing {file}"}, 404)
-                    return
-                content_type = "text/html; charset=utf-8"
-                if file.suffix == ".js":
-                    content_type = "application/javascript; charset=utf-8"
-                elif file.suffix == ".css":
-                    content_type = "text/css; charset=utf-8"
-                self._text(file.read_bytes(), content_type)
+                self._json({"error": "not found"}, 404)
             except Exception as exc:
                 self._json({"error": str(exc)}, 500)
 
         def do_POST(self):  # noqa: N802
             path = urlparse(self.path).path
             try:
+                if app.user_store and path == "/api/login":
+                    payload = self._read_json()
+                    user = app.user_store.authenticate(str(payload.get("username") or ""), str(payload.get("password") or ""))
+                    if not user:
+                        self._json({"error": "账号或密码不正确"}, 401)
+                        return
+                    token = app.user_store.create_session(user["id"])
+                    self._json({"authenticated": True, "user": user}, headers=[("Set-Cookie", self._session_cookie_header(token))])
+                    return
+                if app.user_store and path == "/api/logout":
+                    app.user_store.delete_session(self._session_token())
+                    self._json({"ok": True}, headers=[("Set-Cookie", self._clear_cookie_header())])
+                    return
                 if not self._authorized():
                     self._auth_challenge()
                     return
+                user = self._require_user() if app.user_store and path.startswith("/api/") else None
+                if app.user_store and path.startswith("/api/") and not user:
+                    return
+                user_id = user["id"] if user else None
                 payload = self._read_json()
                 if path == "/api/portfolio/save":
-                    self._json({"portfolio": app.save_portfolio_payload(payload.get("portfolio", payload))})
+                    self._json({"portfolio": app.save_portfolio_payload(payload.get("portfolio", payload), user_id=user_id)})
                     return
                 if path == "/api/portfolio/parse-text":
-                    self._json({"portfolio": app.parse_portfolio_text(str(payload.get("text", "")))})
+                    self._json({"portfolio": app.parse_portfolio_text(str(payload.get("text", "")), user_id=user_id)})
                     return
                 if path == "/api/run":
-                    self._json({"plan": app.run_plan(payload, kind=str(payload.get("kind", "manual")))})
+                    self._json({"plan": app.run_plan(payload, kind=str(payload.get("kind", "manual")), user_id=user_id)})
                     return
                 if path == "/api/quotes/test":
-                    self._json(app.test_quotes(payload))
+                    self._json(app.test_quotes(payload, user_id=user_id))
                     return
                 if path == "/api/settings/save":
-                    state = app.load_state()
+                    state = app.load_state(user_id=user_id)
                     state["settings"] = {**state.get("settings", {}), **payload.get("settings", {})}
-                    app.save_state(state)
+                    app.save_state(state, user_id=user_id)
                     self._json({"settings": state["settings"]})
                     return
                 self._json({"error": "not found"}, 404)

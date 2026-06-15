@@ -2,6 +2,7 @@ let appState = null;
 let latestRun = null;
 let isRunning = false;
 let progressTimer = null;
+let currentUser = null;
 
 const defaultSymbols = ["MU", "AAOI", "INTC", "LITE", "MRVL"];
 const regimeLabels = { risk_on: "风险偏多", neutral: "中性", risk_off: "风险收缩" };
@@ -383,6 +384,9 @@ function translateWarning(warning) {
 
 function translateError(message) {
   const text = String(message || "");
+  if (text.includes("unauthorized") || text.includes("账号或密码不正确")) {
+    return text.includes("账号或密码不正确") ? "账号或密码不正确" : "登录已过期，请重新登录。";
+  }
   if (text.includes("10197") || text.includes("competing live session")) {
     return "IBKR 已连接，但行情被其他 live session 占用。请关闭同账号其它占用实时行情的 TWS/Gateway/移动端行情窗口，或换一个有行情权限的用户，再重试；也可以暂时用付费数据源。";
   }
@@ -484,17 +488,98 @@ function addPositionRow(symbol = "", position = {}) {
 }
 
 async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...options,
+    headers,
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "request failed");
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (_error) {
+    payload = { error: text || "request failed" };
+  }
+  if (!response.ok) {
+    const error = new Error(payload.error || "request failed");
+    if (response.status === 401) error.code = "unauthorized";
+    if (response.status === 401 && path !== "/api/login" && path !== "/api/session") {
+      setAuthVisible(false);
+      $("loginMessage").textContent = "登录已过期，请重新登录。";
+    }
+    throw error;
+  }
   return payload;
 }
 
 function setStatus(text) {
   $("statusLine").textContent = text;
+}
+
+function setAuthVisible(authenticated, user = null) {
+  currentUser = user;
+  $("loginScreen").hidden = authenticated;
+  $("appTopbar").hidden = !authenticated;
+  $("appWorkspace").hidden = !authenticated;
+  const userTag = $("currentUserTag");
+  userTag.hidden = !user;
+  userTag.textContent = user ? `当前用户：${user.display_name || user.username}` : "";
+  $("logoutBtn").hidden = !user;
+  if (!authenticated) {
+    $("loginPassword").value = "";
+    setTimeout(() => $("loginUsername").focus(), 0);
+  }
+}
+
+async function checkSession() {
+  try {
+    const session = await api("/api/session");
+    setAuthVisible(!!session.authenticated, session.user || null);
+    return !!session.authenticated;
+  } catch (error) {
+    setAuthVisible(false);
+    $("loginMessage").textContent = translateError(error.message);
+    return false;
+  }
+}
+
+async function login(event) {
+  event.preventDefault();
+  const username = $("loginUsername").value.trim();
+  const password = $("loginPassword").value;
+  if (!username || !password) {
+    $("loginMessage").textContent = "请输入账号和密码";
+    return;
+  }
+  $("loginBtn").disabled = true;
+  $("loginBtn").textContent = "登录中...";
+  $("loginMessage").textContent = "";
+  try {
+    const session = await api("/api/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    setAuthVisible(true, session.user || null);
+    await loadState();
+  } catch (error) {
+    $("loginMessage").textContent = translateError(error.message);
+  } finally {
+    $("loginBtn").disabled = false;
+    $("loginBtn").textContent = "登录";
+  }
+}
+
+async function logout() {
+  try {
+    await api("/api/logout", { method: "POST", body: "{}" });
+  } catch (_error) {
+    // Local/basic mode may not expose logout; the UI only shows this button in user mode.
+  }
+  appState = null;
+  latestRun = null;
+  setAuthVisible(false);
+  $("loginMessage").textContent = "已退出";
 }
 
 function scoreSummary(score) {
@@ -1430,6 +1515,12 @@ async function loadState() {
   if (!isRunning) setStatus(`就绪 · ${new Date().toLocaleString()}`);
 }
 
+async function bootstrap() {
+  const authenticated = await checkSession();
+  if (!authenticated) return;
+  await loadState();
+}
+
 async function saveSettings() {
   const settings = currentSettingsFromForm();
   await api("/api/settings/save", { method: "POST", body: JSON.stringify({ settings }) });
@@ -1943,11 +2034,13 @@ function initHelpPopovers() {
   window.addEventListener("scroll", hideHelpPopover, true);
 }
 
+$("loginForm").addEventListener("submit", login);
+$("logoutBtn").addEventListener("click", logout);
 $("addRowBtn").addEventListener("click", () => addPositionRow());
 $("savePortfolioBtn").addEventListener("click", savePortfolio);
 $("parseTextBtn").addEventListener("click", parseTextPortfolio);
 $("runBtn").addEventListener("click", () => runPlan("manual"));
-$("reloadBtn").addEventListener("click", loadState);
+$("reloadBtn").addEventListener("click", () => loadState().catch((error) => setStatus(translateError(error.message))));
 $("saveSettingsBtn").addEventListener("click", saveSettings);
 $("provider").addEventListener("change", toggleMarketDataSettings);
 $("testMassiveBtn").addEventListener("click", testMassiveQuotes);
@@ -1970,4 +2063,7 @@ window.addEventListener("keydown", (event) => {
 
 initResearchWindowDrag();
 initHelpPopovers();
-loadState().catch((error) => setStatus(error.message));
+bootstrap().catch((error) => {
+  setAuthVisible(false);
+  $("loginMessage").textContent = translateError(error.message);
+});

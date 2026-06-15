@@ -7,7 +7,27 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <header class="topbar">
+    <section id="loginScreen" class="login-screen" hidden>
+      <form id="loginForm" class="login-card">
+        <div class="login-brand">
+          <span>Semis Position Agent</span>
+          <h1>登录交易研究台</h1>
+          <p>每个账号独立保存持仓、设置和跑批记录；行情源只读，不读取券商账户，也不会下单。</p>
+        </div>
+        <label class="field">
+          <span>账号</span>
+          <input id="loginUsername" type="text" autocomplete="username" placeholder="输入账号" />
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="loginPassword" type="password" autocomplete="current-password" placeholder="输入密码" />
+        </label>
+        <button id="loginBtn" class="primary login-button" type="submit">登录</button>
+        <p id="loginMessage" class="login-message"></p>
+      </form>
+    </section>
+
+    <header id="appTopbar" class="topbar" hidden>
       <div>
         <h1>Semis Position Agent</h1>
         <p id="statusLine">加载中</p>
@@ -41,11 +61,13 @@
           <input id="scheduleEnabled" type="checkbox" />
           <span>自动跑 <span class="hint" title="本地服务开着才会自动跑；不会自动下单。">?</span></span>
         </label>
+        <span id="currentUserTag" class="user-tag" hidden></span>
         <button id="saveSettingsBtn" type="button">保存设置</button>
+        <button id="logoutBtn" type="button" hidden>退出</button>
       </div>
     </header>
 
-    <main class="workspace">
+    <main id="appWorkspace" class="workspace" hidden>
       <section id="massiveSettings" class="ibkr-panel">
         <div class="section-head">
           <h2>Massive/Polygon 行情设置</h2>
