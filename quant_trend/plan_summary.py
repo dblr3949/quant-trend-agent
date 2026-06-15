@@ -355,7 +355,7 @@ def _combine_usage(items: list[dict | None]) -> dict:
 
 
 def _call_openai_summary(compact: dict, *, effort_override: str | None = None, format_retry: bool = False, model: str | None = None) -> dict | None:
-    model = model or os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
+    model = model or os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "qwen3.7-max")
     target = resolve_llm_target(model)
     api_key = os.getenv(target["api_key_env"])
     if not api_key:

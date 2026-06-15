@@ -43,6 +43,7 @@ RUNS_DIR = "reports/agent_runs"
 RUN_ID_LENGTH = 22
 DEFAULT_SETTINGS = {
     "provider": "massive",
+    "llm_model": "qwen3.7-max",
     "refresh_history": True,
     "schedule_enabled": False,
     "massive_rest_url": "http://44.219.45.87:8081",
@@ -795,7 +796,7 @@ class AgentApp:
                     "id": run_id,
                     "kind": kind,
                     "provider": provider,
-                    "model": llm_model or os.getenv("OPENAI_MODEL", "gpt-5.5"),
+                    "model": llm_model or os.getenv("OPENAI_MODEL", "qwen3.7-max"),
                     "prompt": prompt,
                     "created_at": _now_iso(),
                 }

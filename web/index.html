@@ -15,7 +15,7 @@
         <div class="login-brand">
           <span>Semis Position Agent</span>
           <h1>登录交易研究台</h1>
-          <p>每个账号独立保存持仓、设置和跑批记录；行情源只读，不读取券商账户，也不会下单。</p>
+          <p>面向半导体组合的交易研究终端，集中管理持仓、实时行情、量价结构、杠杆风险与调仓记录。</p>
         </div>
         <label class="field">
           <span>账号</span>
@@ -47,13 +47,13 @@
             <option value="alpaca">Alpaca 行情</option>
           </select>
         </label>
-        <label class="field compact" title="点位复核与重点总结使用的大模型。默认 gpt-5.5；DeepSeek 需在 config/openai.env 填 DEEPSEEK_API_KEY。">
-          <span>模型 <span class="hint" title="决定两段 LLM（点位复核、重点总结）用哪个模型。默认 OpenAI gpt-5.5。">?</span></span>
+        <label class="field compact" title="点位复核与重点总结使用的模型。默认 Qwen3.7-Max；DeepSeek 需在 config/openai.env 填 DEEPSEEK_API_KEY。">
+          <span>模型 <span class="hint" title="决定两段模型分析（点位复核、重点总结）用哪个模型。默认 Qwen3.7-Max。">?</span></span>
           <select id="llmModel">
-            <option value="gpt-5.5">OpenAI gpt-5.5（默认）</option>
+            <option value="qwen3.7-max">Qwen3.7-Max（默认·百炼）</option>
+            <option value="gpt-5.5">OpenAI gpt-5.5</option>
             <option value="deepseek-chat">DeepSeek V4（非思考·点位稳）</option>
             <option value="deepseek-reasoner">DeepSeek V4（思考·更深）</option>
-            <option value="qwen3.7-max">Qwen3.7-Max（百炼）</option>
           </select>
         </label>
         <label class="toggle" title="缺少本地日线 CSV 时，自动补齐用于均线、ATR、趋势判断的历史日线。">
