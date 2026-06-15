@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: quant-trend-agent
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: APP_DATA_DIR
+        value: /data
+      - key: APP_USERNAME
+        value: agent
+      - key: APP_PASSWORD
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.5
+      - key: OPENAI_DECISION_REASONING_EFFORT
+        value: medium
+      - key: OPENAI_DECISION_MAX_OUTPUT_TOKENS
+        value: 12000
+      - key: OPENAI_SUMMARY_REASONING_EFFORT
+        value: medium
+      - key: OPENAI_SUMMARY_MAX_OUTPUT_TOKENS
+        value: 8000
+      - key: OPENAI_RETRY_429_SECONDS
+        value: 20,60
+      - key: OPENAI_DECISION_VERBOSITY
+        value: low
+      - key: OPENAI_SUMMARY_VERBOSITY
+        value: medium
+      - key: MASSIVE_API_KEY
+        sync: false
+      - key: MASSIVE_REST_URL
+        value: http://44.219.45.87:8081
+      - key: MASSIVE_WS_URL
+        value: ws://44.219.45.87:8080/ws
+    disk:
+      name: agent-data
+      mountPath: /data
+      sizeGB: 1

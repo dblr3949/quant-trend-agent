@@ -340,30 +340,41 @@ class MassiveDataClient:
         bid = _float_or_none(last_quote.get("p") or last_quote.get("bid") or last_quote.get("bid_price"))
         ask = _float_or_none(last_quote.get("P") or last_quote.get("ask") or last_quote.get("ask_price"))
         midpoint = (bid + ask) / 2.0 if bid and ask else None
+        trade_ts = _polygon_timestamp_to_iso(last_trade.get("t") or last_trade.get("sip_timestamp") or last_trade.get("timestamp"))
+        quote_ts = _polygon_timestamp_to_iso(last_quote.get("t") or last_quote.get("timestamp"))
+        minute_ts = _polygon_timestamp_to_iso(minute.get("t") or minute.get("timestamp"))
+        updated_ts = _polygon_timestamp_to_iso(ticker.get("updated") or ticker.get("lastUpdate"))
         candidates = [
-            ("last", _float_or_none(last_trade.get("p") or last_trade.get("price"))),
-            ("day", _float_or_none(day.get("c") or day.get("close"))),
-            ("minute", _float_or_none(minute.get("c") or minute.get("close"))),
-            ("midpoint", midpoint),
-            ("ask", ask),
-            ("bid", bid),
-            ("prev_close", _float_or_none(prev_day.get("c") or prev_day.get("close"))),
+            ("last", _float_or_none(last_trade.get("p") or last_trade.get("price")), trade_ts),
+            ("day", _float_or_none(day.get("c") or day.get("close")), updated_ts),
+            ("minute", _float_or_none(minute.get("c") or minute.get("close")), minute_ts or updated_ts),
+            ("midpoint", midpoint, quote_ts),
+            ("ask", ask, quote_ts),
+            ("bid", bid, quote_ts),
+            ("prev_close", _float_or_none(prev_day.get("c") or prev_day.get("close")), None),
         ]
         price_kind = "unknown"
         price = None
-        for candidate_kind, candidate_price in candidates:
+        asof = None
+        for candidate_kind, candidate_price, candidate_ts in candidates:
             if candidate_price is not None:
                 price_kind = candidate_kind
                 price = candidate_price
+                asof = candidate_ts
                 break
         if price is None:
             return None
+        # Only stamp a real (or "now") timestamp for live-ish fields. A prevDay
+        # close has no fresh timestamp, so leave asof=None and let the snapshot
+        # builder treat it as a stale close fallback instead of a live price.
+        if asof is None and price_kind != "prev_close":
+            asof = datetime.now(timezone.utc).isoformat()
         return Quote(
             symbol=symbol.upper(),
             price=float(price),
             bid=bid,
             ask=ask,
-            asof=datetime.now(timezone.utc).isoformat(),
+            asof=asof,
             source=f"massive:snapshot:{price_kind}",
         )
 
@@ -373,10 +384,11 @@ class MassiveDataClient:
         price = _float_or_none(trade.get("p") or trade.get("price"))
         if price is None:
             return None
+        asof = _polygon_timestamp_to_iso(trade.get("t") or trade.get("sip_timestamp") or trade.get("timestamp"))
         return Quote(
             symbol=symbol.upper(),
             price=price,
-            asof=datetime.now(timezone.utc).isoformat(),
+            asof=asof or datetime.now(timezone.utc).isoformat(),
             source="massive:last_trade",
         )
 

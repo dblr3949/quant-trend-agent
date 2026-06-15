@@ -56,6 +56,8 @@ DEFAULT_CONFIG = {
         "min_trade_value": 500.0,
         "rebalance_band_pct": 0.015,
         "max_quote_age_minutes": 20.0,
+        "max_quote_age_minutes_extended": 180.0,
+        "max_quote_age_minutes_closed": 0.0,
         "limit_offset_bps": 15.0,
         "max_limit_offset_bps": 80.0,
         "min_margin_cushion": 50000.0,
@@ -120,11 +122,15 @@ def build_snapshot(symbol: str, bars: list[Bar], quote: Quote | None = None) -> 
     source = quote.source if quote else "daily_close"
     quote_age = quote_age_minutes(quote) if quote else None
     quote_asof = quote.asof if quote else None
-    if quote and close is not None and str(quote.source).startswith("ibkr:") and str(quote.source).endswith(":close"):
+    quote_source = str(quote.source) if quote else ""
+    is_close_like = quote_source.endswith((":close", ":prev_close"))
+    if quote and close is not None and is_close_like:
         quote_distance = abs((float(quote.price) / close) - 1.0) if close else 0.0
-        if quote_distance >= 0.0005:
+        # A prevDay close is always stale relative to the current session; an
+        # IBKR close tick is only ignored when it disagrees with the daily close.
+        if quote_source.endswith(":prev_close") or quote_distance >= 0.0005:
             price = close
-            source = "daily_close:ibkr_close_tick_ignored"
+            source = "daily_close:stale_close_ignored"
             quote_age = None
             quote_asof = None
 
@@ -659,6 +665,22 @@ def _current_market_snapshot_label(asof: str | None) -> dict:
         "session_label": label,
         "display": f"{label} {ny_time.strftime('%m-%d %H:%M')} ET",
     }
+
+
+def _effective_quote_age_limit(session: str, risk: dict) -> float:
+    """Max quote age (minutes) before a quote blocks adds, by trading session.
+
+    Regular hours use the tight limit. Pre/post-market trades are sparse, so a
+    last trade can legitimately be older without being "stale"; closed sessions
+    disable the age block entirely (value <= 0) so overnight/weekend prep still
+    produces suggestions off the last known price.
+    """
+    base = float(risk.get("max_quote_age_minutes", 20.0))
+    if session == "regular":
+        return base
+    if session in {"premarket", "postmarket"}:
+        return float(risk.get("max_quote_age_minutes_extended", base * 9))
+    return float(risk.get("max_quote_age_minutes_closed", 0.0))
 
 
 def _should_append_current_bar(
@@ -1765,8 +1787,8 @@ def build_trade_plan(
         daily_bars_by_symbol[symbol] = bars
         try:
             snapshots[symbol] = build_snapshot(symbol, bars, quotes.get(symbol))
-            if snapshots[symbol].source == "daily_close:ibkr_close_tick_ignored":
-                data_warnings.append(f"{symbol}: IBKR close tick 与最新日线不一致，现价改用最新完整日线收盘价。")
+            if snapshots[symbol].source == "daily_close:stale_close_ignored":
+                data_warnings.append(f"{symbol}: 收盘/昨收报价与最新日线不一致或无实时行情，现价改用最新完整日线收盘价。")
         except ValueError as exc:
             data_warnings.append(str(exc))
 
@@ -1791,6 +1813,11 @@ def build_trade_plan(
     market_technical_analysis = {symbol: all_technical_analysis[symbol] for symbol in sorted(proxies) if symbol in all_technical_analysis}
     market_structure = _market_structure_context(market_technical_analysis, regime)
     risk = config["risk"]
+    market_session = _current_market_snapshot_label(datetime.now(timezone.utc).isoformat())
+    session = market_session["session"]
+    max_quote_age = _effective_quote_age_limit(session, risk)
+    age_check_enabled = max_quote_age > 0
+    market_session = {**market_session, "effective_max_quote_age_minutes": max_quote_age, "quote_age_block_enabled": age_check_enabled}
     equity = portfolio.account_equity
     base_weights = {symbol.upper(): float(value) for symbol, value in config.get("base_target_weights", {}).items()}
     target_gross, target_gross_reasons = _apply_target_gross_hint(float(regime["target_gross_exposure"]), portfolio, regime["label"], risk)
@@ -1854,7 +1881,8 @@ def build_trade_plan(
         target_value = target_weight * equity
         delta_value = target_value - current_value
         quote_age = snapshot.quote_age_minutes
-        quote_stale = quote_age is not None and quote_age > float(risk["max_quote_age_minutes"])
+        stale_close_fallback = str(snapshot.source).startswith("daily_close")
+        quote_stale = stale_close_fallback or (age_check_enabled and quote_age is not None and quote_age > max_quote_age)
         position = portfolio.positions.get(symbol)
         shares_held = position.shares if position else 0
         bucket = position.bucket if position else "auto"
@@ -1874,7 +1902,7 @@ def build_trade_plan(
         side = None
         value_to_trade = 0.0
         if quote_stale:
-            reasons.append(f"quote_stale:{quote_age:.1f}m")
+            reasons.append("quote_stale:close_fallback" if stale_close_fallback else f"quote_stale:{quote_age:.1f}m>{max_quote_age:.0f}m@{session}")
         elif _is_range_trade_overlay(overlay) and current_gross_value <= max_gross_value:
             action = "range_trade"
             if range_trade_target == "flat_required":
@@ -1992,8 +2020,11 @@ def build_trade_plan(
         if not snapshot:
             continue
         quote_age = snapshot.quote_age_minutes
-        if quote_age is not None and quote_age > float(risk["max_quote_age_minutes"]):
-            data_warnings.append(f"{symbol}: 做T计划跳过，行情时间过旧 {quote_age:.1f}m")
+        if str(snapshot.source).startswith("daily_close"):
+            data_warnings.append(f"{symbol}: 做T计划跳过，无实时行情，仅有日线收盘兜底价")
+            continue
+        if age_check_enabled and quote_age is not None and quote_age > max_quote_age:
+            data_warnings.append(f"{symbol}: 做T计划跳过，行情时间过旧 {quote_age:.1f}m（{session}限{max_quote_age:.0f}m）")
             continue
         position = portfolio.positions.get(symbol)
         shares_held = position.shares if position else 0
@@ -2153,6 +2184,7 @@ def build_trade_plan(
             "stress_gross_exposure_after_orders": round(stress_gross_exposure, 4),
         },
         "regime": regime,
+        "market_session": market_session,
         "orders": orders,
         "trade_groups": trade_groups,
         "positions": positions,

@@ -383,6 +383,20 @@ python3 scripts/run_agent_app.py
 
 如果看到 `No market data during competing live session`，说明 IBKR 已连接但行情被同账号的其它 live session 占用，需要关闭其它占用行情的 TWS/Gateway/移动端行情窗口，或换一个有行情权限的用户。
 
+### 云端部署
+
+项目包含 `Dockerfile`、`railway.json` 和 `render.yaml`，可部署成单用户私有网页。云端必须设置：
+
+- `APP_USERNAME`：网页登录用户名，默认可用 `agent`
+- `APP_PASSWORD`：网页登录密码
+- `APP_DATA_DIR=/data`：持久化状态、持仓、跑批记录和行情缓存
+- `OPENAI_API_KEY`
+- `MASSIVE_API_KEY`
+
+Railway/Render 上要挂载持久化 volume/disk 到 `/data`，否则重新部署后网页里保存的持仓和跑批记录会丢失。本地运行时不设置 `APP_PASSWORD` 就不会启用浏览器密码弹窗。
+
+部署后更新流程是：本地修改代码，提交并推送到 GitHub，云平台自动重新构建；用户刷新同一个网址即可使用新版。
+
 ### Prompt 约束
 
 - “不主动加仓 / 只减不加 / 少加仓”会被解析成软约束：证据不足时尊重，证据很强时可以反驳并在原因里写出证据分

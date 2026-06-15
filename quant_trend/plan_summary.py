@@ -7,6 +7,13 @@ from datetime import datetime, timezone
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from .llm_decision import _chat_message_text, _extract_chat_usage, resolve_llm_target
+
+
+# Transient statuses worth retrying: rate limits plus gateway/edge errors
+# (e.g. Cloudflare 520/522/524, 5xx) that surface as one-off failures.
+_OPENAI_RETRY_STATUS = frozenset({429, 500, 502, 503, 504, 520, 522, 524, 529})
+
 
 def _openai_ssl_context() -> ssl.SSLContext:
     try:
@@ -336,7 +343,7 @@ def _openai_json_request(request: Request, timeout: float, context: ssl.SSLConte
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")[:2000]
-            if exc.code == 429 and attempt < len(retry_delays):
+            if exc.code in _OPENAI_RETRY_STATUS and attempt < len(retry_delays):
                 time.sleep(retry_delays[attempt])
                 continue
             raise RuntimeError(f"OpenAI HTTP {exc.code}: {body or exc.reason}") from exc
@@ -347,11 +354,12 @@ def _combine_usage(items: list[dict | None]) -> dict:
     return {key: sum(int((item or {}).get(key) or 0) for item in items) for key in keys}
 
 
-def _call_openai_summary(compact: dict, *, effort_override: str | None = None, format_retry: bool = False) -> dict | None:
-    api_key = os.getenv("OPENAI_API_KEY")
+def _call_openai_summary(compact: dict, *, effort_override: str | None = None, format_retry: bool = False, model: str | None = None) -> dict | None:
+    model = model or os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
+    target = resolve_llm_target(model)
+    api_key = os.getenv(target["api_key_env"])
     if not api_key:
         return None
-    model = os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
     timeout = float(os.getenv("OPENAI_SUMMARY_TIMEOUT_SECONDS", "90"))
     max_output_tokens = int(os.getenv("OPENAI_SUMMARY_MAX_OUTPUT_TOKENS", "8000"))
     system = (
@@ -376,17 +384,35 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None, f
             "本次凡评分必须逐字复制输入里的 *_score_text；其他数字不要使用斜杠连接。"
             "不要写 2/6、8.9/10、1.65/2.00、49825/70374。"
         )
-    body = _apply_gpt5_options({
-        "model": model,
-        "input": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
-        ],
-        "temperature": 0.2,
-        "max_output_tokens": max_output_tokens,
-    }, "SUMMARY", "medium", "medium", effort_override=effort_override)
+    user_content = json.dumps(compact, ensure_ascii=False)
+    if target["kind"] == "responses":
+        body = _apply_gpt5_options({
+            "model": model,
+            "input": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.2,
+            "max_output_tokens": max_output_tokens,
+        }, "SUMMARY", "medium", "medium", effort_override=effort_override)
+        effort = (body.get("reasoning") or {}).get("effort")
+    else:
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.2,
+            "max_tokens": max_output_tokens,
+        }
+        if target.get("provider") == "qwen":
+            # Qwen3 thinking mode is slow enough to hit the summary timeout; default
+            # it off (override via QWEN_ENABLE_THINKING) so summaries return in time.
+            body["enable_thinking"] = os.getenv("QWEN_ENABLE_THINKING", "false").strip().lower() in {"1", "true", "yes"}
+        effort = None
     request = Request(
-        "https://api.openai.com/v1/responses",
+        target["base_url"] + target["path"],
         data=json.dumps(body).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -396,32 +422,39 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None, f
     )
     context = _openai_ssl_context()
     payload = _openai_json_request(request, timeout, context)
-    text = _extract_openai_text(payload)
-    usage = _extract_openai_usage(payload)
+    if target["kind"] == "responses":
+        text = _extract_openai_text(payload)
+        usage = _extract_openai_usage(payload)
+    else:
+        text = _chat_message_text(payload).strip()
+        usage = _extract_chat_usage(payload)
     if not text:
         return {
             "model": model,
             "text": "",
             "usage": usage,
-            "effort": (body.get("reasoning") or {}).get("effort"),
+            "effort": effort,
             "error": "empty_output",
         }
     return {
         "model": model,
         "text": text.strip(),
         "usage": usage,
-        "effort": (body.get("reasoning") or {}).get("effort"),
+        "effort": effort,
     }
 
 
-def build_executive_summary(plan: dict) -> dict:
+def build_executive_summary(plan: dict, model: str | None = None) -> dict:
     fallback = _fallback_summary(plan)
     compact = _compact_plan(plan)
     try:
-        result = _call_openai_summary(compact)
+        result = _call_openai_summary(compact, model=model)
         attempts = [result] if result else []
-        if isinstance(result, dict) and not result.get("text") and result.get("error") == "empty_output" and result.get("effort") != "low":
-            retry = _call_openai_summary(compact, effort_override="low")
+        # Empty output from a reasoning model usually means it spent the whole
+        # token budget thinking; retry once at low effort. Skip for chat models
+        # (effort is None), where a low-effort retry would be identical.
+        if isinstance(result, dict) and not result.get("text") and result.get("error") == "empty_output" and result.get("effort") not in (None, "low"):
+            retry = _call_openai_summary(compact, effort_override="low", model=model)
             if retry:
                 attempts.append(retry)
                 result = retry
@@ -445,7 +478,7 @@ def build_executive_summary(plan: dict) -> dict:
         return fallback
     if _has_denominator_score_format(text):
         try:
-            retry = _call_openai_summary(compact, format_retry=True)
+            retry = _call_openai_summary(compact, format_retry=True, model=model)
         except Exception as exc:
             retry = {"error": str(exc), "text": "", "usage": None, "model": model}
         if retry:

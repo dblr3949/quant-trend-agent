@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -11,8 +12,8 @@ from quant_trend.env_loader import load_env_file
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8765")))
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]

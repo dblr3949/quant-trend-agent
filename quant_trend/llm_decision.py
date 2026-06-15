@@ -8,6 +8,11 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
+# Transient statuses worth retrying: rate limits plus gateway/edge errors
+# (e.g. Cloudflare 520/522/524, 5xx) that surface as one-off failures.
+_OPENAI_RETRY_STATUS = frozenset({429, 500, 502, 503, 504, 520, 522, 524, 529})
+
+
 def _openai_ssl_context() -> ssl.SSLContext:
     try:
         import certifi
@@ -204,6 +209,56 @@ def _extract_openai_usage(payload: dict) -> dict:
     }
 
 
+def resolve_llm_target(model: str) -> dict:
+    """Map a model id to its transport: OpenAI Responses API vs an
+    OpenAI-compatible chat/completions endpoint (DeepSeek)."""
+    name = str(model or "").lower()
+    if name.startswith("deepseek"):
+        return {
+            "kind": "chat",
+            "provider": "deepseek",
+            "base_url": (os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/"),
+            "path": "/chat/completions",
+            "api_key_env": "DEEPSEEK_API_KEY",
+        }
+    if name.startswith("qwen"):
+        return {
+            "kind": "chat",
+            "provider": "qwen",
+            "base_url": (os.getenv("DASHSCOPE_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/"),
+            "path": "/chat/completions",
+            "api_key_env": "DASHSCOPE_API_KEY",
+        }
+    return {
+        "kind": "responses",
+        "provider": "openai",
+        "base_url": (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/"),
+        "path": "/v1/responses",
+        "api_key_env": "OPENAI_API_KEY",
+    }
+
+
+def _extract_chat_usage(payload: dict) -> dict:
+    usage = payload.get("usage") or {}
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    return {
+        "input_tokens": int(usage.get("prompt_tokens") or 0),
+        "cached_input_tokens": int(prompt_details.get("cached_tokens") or usage.get("prompt_cache_hit_tokens") or 0),
+        "output_tokens": int(usage.get("completion_tokens") or 0),
+        "reasoning_tokens": int(completion_details.get("reasoning_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
+
+
+def _chat_message_text(payload: dict) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "")
+
+
 def _openai_json_request(request: Request, timeout: float, context: ssl.SSLContext) -> dict:
     retry_delays = [float(item) for item in os.getenv("OPENAI_RETRY_429_SECONDS", "20,60").split(",") if item.strip()]
     attempts = len(retry_delays) + 1
@@ -213,17 +268,18 @@ def _openai_json_request(request: Request, timeout: float, context: ssl.SSLConte
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")[:2000]
-            if exc.code == 429 and attempt < len(retry_delays):
+            if exc.code in _OPENAI_RETRY_STATUS and attempt < len(retry_delays):
                 time.sleep(retry_delays[attempt])
                 continue
             raise RuntimeError(f"OpenAI HTTP {exc.code}: {body or exc.reason}") from exc
 
 
-def _call_openai_decisions(compact: dict) -> dict | None:
-    api_key = os.getenv("OPENAI_API_KEY")
+def _call_openai_decisions(compact: dict, model: str | None = None) -> dict | None:
+    model = model or os.getenv("OPENAI_DECISION_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
+    target = resolve_llm_target(model)
+    api_key = os.getenv(target["api_key_env"])
     if not api_key or not compact.get("orders"):
         return None
-    model = os.getenv("OPENAI_DECISION_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
     system = (
         "你是美股半导体仓位管理的点位复核助手。"
         "每张单的主执行 candidate_id 只能从 candidate_levels 里选择；若 candidate_levels 为空，candidate_id 返回 null。"
@@ -279,25 +335,42 @@ def _call_openai_decisions(compact: dict) -> dict | None:
         "additionalProperties": False,
     }
     max_output_tokens = int(os.getenv("OPENAI_DECISION_MAX_OUTPUT_TOKENS", "12000"))
-    body = _apply_gpt5_options({
-        "model": model,
-        "input": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
-        ],
-        "temperature": 0.1,
-        "max_output_tokens": max_output_tokens,
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "limit_decisions",
-                "schema": decision_schema,
-                "strict": True,
-            }
-        },
-    }, "DECISION", "medium", "low")
+    user_content = json.dumps(compact, ensure_ascii=False)
+    if target["kind"] == "responses":
+        body = _apply_gpt5_options({
+            "model": model,
+            "input": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.1,
+            "max_output_tokens": max_output_tokens,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "limit_decisions",
+                    "schema": decision_schema,
+                    "strict": True,
+                }
+            },
+        }, "DECISION", "medium", "low")
+    else:
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_output_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        if target.get("provider") == "qwen":
+            # Qwen3 thinking mode is slow (60-90s on this payload) and adds little
+            # for constrained candidate selection; default it off, override via env.
+            body["enable_thinking"] = os.getenv("QWEN_ENABLE_THINKING", "false").strip().lower() in {"1", "true", "yes"}
     request = Request(
-        "https://api.openai.com/v1/responses",
+        target["base_url"] + target["path"],
         data=json.dumps(body).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -307,27 +380,36 @@ def _call_openai_decisions(compact: dict) -> dict | None:
     )
     timeout = float(os.getenv("OPENAI_DECISION_TIMEOUT_SECONDS", "120"))
     payload = _openai_json_request(request, timeout, _openai_ssl_context())
-    text = str(payload.get("output_text") or "")
+    if target["kind"] == "responses":
+        text = str(payload.get("output_text") or "")
+        if not text:
+            chunks = []
+            for item in payload.get("output", []):
+                for content in item.get("content", []):
+                    if content.get("type") in {"output_text", "text"} and content.get("text"):
+                        chunks.append(str(content["text"]))
+            text = "\n".join(chunks)
+        usage = _extract_openai_usage(payload)
+        incomplete = payload.get("status") == "incomplete"
+        incomplete_reason = (payload.get("incomplete_details") or {}).get("reason")
+    else:
+        text = _chat_message_text(payload)
+        usage = _extract_chat_usage(payload)
+        finish_reason = ((payload.get("choices") or [{}])[0]).get("finish_reason")
+        incomplete = finish_reason == "length"
+        incomplete_reason = finish_reason
     if not text:
-        chunks = []
-        for item in payload.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") in {"output_text", "text"} and content.get("text"):
-                    chunks.append(str(content["text"]))
-        text = "\n".join(chunks)
-    if not text:
-        return {
-            "_openai_model": model,
-            "_openai_usage": _extract_openai_usage(payload),
-            "_openai_error": "empty_output",
-            "decisions": [],
-        }
-    usage = _extract_openai_usage(payload)
-    if payload.get("status") == "incomplete":
         return {
             "_openai_model": model,
             "_openai_usage": usage,
-            "_openai_error": f"incomplete:{(payload.get('incomplete_details') or {}).get('reason')}",
+            "_openai_error": "empty_output",
+            "decisions": [],
+        }
+    if incomplete:
+        return {
+            "_openai_model": model,
+            "_openai_usage": usage,
+            "_openai_error": f"incomplete:{incomplete_reason}",
             "_openai_raw_preview": text[:1200],
             "decisions": [],
         }
@@ -431,7 +513,10 @@ def _decision_target_shares(order: dict, raw_shares: object, position_shares: in
         return min(shares, max(0, int(position_shares)))
     target_value = float(order.get("target_trade_value") or order.get("notional") or 0.0)
     current_value = float(order.get("notional") or 0.0)
-    cap_multiplier = max(1.0, float(os.getenv("OPENAI_DECISION_SHARE_CAP_MULTIPLIER", "2.0")))
+    # Default 1.0: the LLM may trim a buy but must not inflate it past the value
+    # build_trade_plan already clamped to the gross-exposure / margin budget.
+    # Raising OPENAI_DECISION_SHARE_CAP_MULTIPLIER re-opens headroom on purpose.
+    cap_multiplier = max(1.0, float(os.getenv("OPENAI_DECISION_SHARE_CAP_MULTIPLIER", "1.0")))
     cap_value = max(target_value, current_value, price) * cap_multiplier
     max_shares = max(1, int(cap_value // price))
     return min(shares, max_shares)
@@ -488,12 +573,12 @@ def _fallback_ladder(order: dict, position_shares: int) -> list[dict]:
     return _sanitize_ladder(order, raw, position_shares)
 
 
-def apply_llm_limit_decisions(plan: dict) -> dict | None:
+def apply_llm_limit_decisions(plan: dict, model: str | None = None) -> dict | None:
     compact = _compact_plan(plan)
     if not compact.get("orders"):
         return None
     try:
-        payload = _call_openai_decisions(compact)
+        payload = _call_openai_decisions(compact, model=model)
     except Exception as exc:
         return {
             "asof": datetime.now(timezone.utc).isoformat(),
@@ -634,6 +719,11 @@ def apply_llm_limit_decisions(plan: dict) -> dict | None:
             haircut = 0.5
             after_buys = float(portfolio.get("margin_cushion") or 0.0) - planned_buy * haircut
             portfolio["estimated_margin_cushion_after_buys"] = round(after_buys, 2)
+            min_cushion = portfolio.get("min_margin_cushion")
+            if min_cushion is not None and after_buys < float(min_cushion):
+                plan.setdefault("data_warnings", []).append(
+                    f"LLM 调整后维持保证金安全垫低于安全线: {after_buys:.0f} < {float(min_cushion):.0f}"
+                )
 
     return {
         "asof": datetime.now(timezone.utc).isoformat(),

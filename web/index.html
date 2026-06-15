@@ -24,6 +24,15 @@
             <option value="alpaca">Alpaca 行情</option>
           </select>
         </label>
+        <label class="field compact" title="点位复核与重点总结使用的大模型。默认 gpt-5.5；DeepSeek 需在 config/openai.env 填 DEEPSEEK_API_KEY。">
+          <span>模型 <span class="hint" title="决定两段 LLM（点位复核、重点总结）用哪个模型。默认 OpenAI gpt-5.5。">?</span></span>
+          <select id="llmModel">
+            <option value="gpt-5.5">OpenAI gpt-5.5（默认）</option>
+            <option value="deepseek-chat">DeepSeek V4（非思考·点位稳）</option>
+            <option value="deepseek-reasoner">DeepSeek V4（思考·更深）</option>
+            <option value="qwen3.7-max">Qwen3.7-Max（百炼）</option>
+          </select>
+        </label>
         <label class="toggle" title="缺少本地日线 CSV 时，自动补齐用于均线、ATR、趋势判断的历史日线。">
           <input id="refreshHistory" type="checkbox" checked />
           <span>补日线 <span class="hint" title="用于技术面计算，不是实时行情。">?</span></span>
@@ -122,8 +131,8 @@
             <input id="fetchIntraday" type="checkbox" checked />
             <span>读取当日分钟线 <span class="hint" title="Massive/Polygon 为默认；IBKR 和 Yahoo 只作为可选兜底。">?</span></span>
           </label>
-          <label class="field" title="分钟线越细越灵敏，也越慢；5 分钟适合盘中仓位管理。">
-            <span>粒度 <span class="hint" title="默认 5 分钟；极短线可切到 1 分钟。">?</span></span>
+          <label class="field" title="分钟线越细越灵敏，也越慢；1 分钟更精细，5 分钟更平滑。">
+            <span>粒度 <span class="hint" title="默认 1 分钟；想更平滑可切到 5 分钟。">?</span></span>
             <select id="intradayBarSize">
               <option value="1 min">1 分钟</option>
               <option value="5 mins">5 分钟</option>
@@ -182,10 +191,6 @@
                   <th>代码</th>
                   <th>股数</th>
                   <th>成本</th>
-                  <th title="基本面逻辑状态，会影响目标权重。">状态</th>
-                  <th title="0 到 1.25，越高目标权重越接近配置上限。">信心</th>
-                  <th title="仓位桶会影响预算倾斜，默认会按核心名单自动推断。">桶</th>
-                  <th title="交易约束是参考项，证据足够时 Agent 可以反驳并写明原因。">约束</th>
                   <th></th>
                 </tr>
               </thead>

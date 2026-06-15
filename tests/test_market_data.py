@@ -64,6 +64,30 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(quote.ask, 101.3)
         self.assertEqual(quote.source, "massive:snapshot:last")
 
+    def test_massive_snapshot_uses_real_trade_timestamp(self):
+        client = MassiveDataClient(api_key="test-key", base_url="http://example.test")
+
+        quote = client._snapshot_quote(
+            "MU",
+            {"ticker": {"lastTrade": {"p": 101.25, "t": 1780358400000}}},
+        )
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.source, "massive:snapshot:last")
+        self.assertTrue(str(quote.asof).startswith("2026-"))
+        self.assertNotEqual(quote.asof, None)
+
+    def test_massive_snapshot_prev_close_is_marked_stale(self):
+        client = MassiveDataClient(api_key="test-key", base_url="http://example.test")
+
+        quote = client._snapshot_quote("MU", {"ticker": {"prevDay": {"c": 99.5}}})
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.price, 99.5)
+        self.assertEqual(quote.source, "massive:snapshot:prev_close")
+        # No fresh timestamp: the snapshot builder must treat this as a stale close.
+        self.assertIsNone(quote.asof)
+
     def test_massive_daily_bars_parse_polygon_aggregates(self):
         client = FakeMassiveDataClient(
             {

@@ -278,6 +278,7 @@ function toggleMarketDataSettings() {
 function currentSettingsFromForm() {
   return {
     provider: $("provider").value,
+    llm_model: $("llmModel").value || "gpt-5.5",
     refresh_history: $("refreshHistory").checked,
     schedule_enabled: $("scheduleEnabled").checked,
     massive_rest_url: $("massiveRestUrl").value || "http://44.219.45.87:8081",
@@ -289,7 +290,7 @@ function currentSettingsFromForm() {
     ibkr_market_data_type: Number($("ibkrMarketDataType").value || 1),
     ibkr_timeout: Number($("ibkrTimeout").value || 8),
     fetch_intraday: $("fetchIntraday").checked,
-    intraday_bar_size: $("intradayBarSize").value || "5 mins",
+    intraday_bar_size: $("intradayBarSize").value || "1 min",
     intraday_duration: $("intradayDuration").value || "1 D",
     intraday_use_rth: $("intradayUseRth").checked,
   };
@@ -428,7 +429,7 @@ function setMassiveTestBusy(value) {
 function emptyPortfolio() {
   const positions = {};
   for (const symbol of defaultSymbols) {
-    positions[symbol] = { shares: 0, avg_cost: "", thesis_status: "intact", conviction: 1, bucket: "auto", trade_constraint: "flexible" };
+    positions[symbol] = { shares: 0, avg_cost: "" };
   }
   return { account_equity: "", cash: 0, margin_debit: 0, maintenance_margin: "", target_gross_hint: "", positions };
 }
@@ -442,10 +443,6 @@ function currentPortfolioFromForm() {
     positions[symbol] = {
       shares: Number(row.querySelector("[data-field='shares']").value || 0),
       avg_cost: row.querySelector("[data-field='avg_cost']").value === "" ? null : Number(row.querySelector("[data-field='avg_cost']").value),
-      thesis_status: row.querySelector("[data-field='thesis_status']").value,
-      conviction: Number(row.querySelector("[data-field='conviction']").value || 1),
-      bucket: row.querySelector("[data-field='bucket']").value,
-      trade_constraint: row.querySelector("[data-field='trade_constraint']").value,
     };
   }
   return {
@@ -480,37 +477,8 @@ function addPositionRow(symbol = "", position = {}) {
     <td><input class="symbol-input" data-field="symbol" value="${symbol}" /></td>
     <td><input class="number-input" data-field="shares" type="number" step="1" value="${position.shares ?? 0}" /></td>
     <td><input class="number-input" data-field="avg_cost" type="number" step="0.01" value="${position.avg_cost ?? ""}" /></td>
-    <td>
-      <select data-field="thesis_status">
-        <option value="intact">${thesisLabels.intact}</option>
-        <option value="watch">${thesisLabels.watch}</option>
-        <option value="broken">${thesisLabels.broken}</option>
-      </select>
-    </td>
-    <td><input class="number-input" data-field="conviction" type="number" min="0" max="1.25" step="0.05" value="${position.conviction ?? 1}" /></td>
-    <td>
-      <select data-field="bucket">
-        <option value="auto">${bucketLabels.auto}</option>
-        <option value="core">${bucketLabels.core}</option>
-        <option value="satellite">${bucketLabels.satellite}</option>
-        <option value="watch">${bucketLabels.watch}</option>
-        <option value="trim">${bucketLabels.trim}</option>
-      </select>
-    </td>
-    <td>
-      <select data-field="trade_constraint">
-        <option value="flexible">${constraintLabels.flexible}</option>
-        <option value="prefer_hold">${constraintLabels.prefer_hold}</option>
-        <option value="soft_no_add">${constraintLabels.soft_no_add}</option>
-        <option value="soft_no_reduce">${constraintLabels.soft_no_reduce}</option>
-        <option value="reduce_only">${constraintLabels.reduce_only}</option>
-      </select>
-    </td>
     <td><button class="remove-btn" type="button">x</button></td>
   `;
-  row.querySelector("[data-field='thesis_status']").value = position.thesis_status || "intact";
-  row.querySelector("[data-field='bucket']").value = position.bucket || "auto";
-  row.querySelector("[data-field='trade_constraint']").value = position.trade_constraint || "flexible";
   row.querySelector(".remove-btn").addEventListener("click", () => row.remove());
   $("positionsBody").appendChild(row);
 }
@@ -693,7 +661,7 @@ function renderResearchFlow(process) {
     {
       title: "1. 持仓与账户输入",
       status: processStatusBadge("手动表格", "ok"),
-      body: "持仓、成本、状态、信心、桶、约束、账户净值、现金、融资、维持保证金和目标杠杆只来自网页/本地输入；行情源不读取账户。",
+      body: "持仓、成本、账户净值、现金、融资、维持保证金和目标杠杆只来自网页/本地输入；个股偏好统一写在“本次调仓想法”里；行情源不读取账户。",
       metrics: [
         processMetric("持仓来源", sourceStatus(sources, "portfolio", "BBAE 手动", "未记录")),
         processMetric("自然语言持仓", "禁用", "预留入口，暂未接入 LLM；本轮不参与计算。"),
@@ -725,7 +693,7 @@ function renderResearchFlow(process) {
     {
       title: "4. 仓位与杠杆预算",
       status: processStatusBadge("硬约束", "danger"),
-      body: "股数不是先拍脑袋，而是先算目标总仓和可交易预算，再按核心/卫星/观察桶、信心、约束、维持保证金安全垫和压力测试切分。",
+      body: "股数不是先拍脑袋，而是先算目标总仓和可交易预算，再按趋势/量价、维持保证金安全垫、压力测试和你“调仓想法”里的约束切分。",
       metrics: [
         scoreMetric(scorecard, "risk", "杠杆/保证金"),
         processMetric("数量来源", "预算倒推", "目标杠杆 × 净值 -> 目标总仓；差额 -> 可买/需卖金额；再换算股数。"),
@@ -1440,6 +1408,7 @@ async function loadState() {
   appState = payload.state;
   latestRun = payload.latest_run;
   $("provider").value = appState.settings.provider || "massive";
+  $("llmModel").value = appState.settings.llm_model || "gpt-5.5";
   $("refreshHistory").checked = appState.settings.refresh_history !== false;
   $("scheduleEnabled").checked = !!appState.settings.schedule_enabled;
   $("massiveRestUrl").value = appState.settings.massive_rest_url || "http://44.219.45.87:8081";
@@ -1451,7 +1420,7 @@ async function loadState() {
   $("ibkrMarketDataType").value = String(appState.settings.ibkr_market_data_type || 1);
   $("ibkrTimeout").value = appState.settings.ibkr_timeout || 8;
   $("fetchIntraday").checked = appState.settings.fetch_intraday !== false;
-  $("intradayBarSize").value = appState.settings.intraday_bar_size || "5 mins";
+  $("intradayBarSize").value = appState.settings.intraday_bar_size || "1 min";
   $("intradayDuration").value = appState.settings.intraday_duration || "1 D";
   $("intradayUseRth").checked = !!appState.settings.intraday_use_rth;
   toggleMarketDataSettings();
@@ -1501,6 +1470,7 @@ async function runPlan(kind = "manual") {
         portfolio,
         prompt: $("runPrompt").value,
         provider: $("provider").value,
+        model: $("llmModel").value,
         refresh_history: $("refreshHistory").checked,
         settings: currentSettingsFromForm(),
         kind,

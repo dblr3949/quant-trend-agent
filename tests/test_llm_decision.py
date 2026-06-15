@@ -56,7 +56,7 @@ class LlmDecisionTests(unittest.TestCase):
         }
         captured = {}
 
-        def fake_call(compact):
+        def fake_call(compact, model=None):
             captured.update(compact)
             return {"decisions": []}
 
@@ -249,7 +249,9 @@ class LlmDecisionTests(unittest.TestCase):
             "shares": 3,
             "limit_price": 95.0,
             "notional": 285.0,
-            "target_trade_value": 300.0,
+            # Budget headroom for 5 shares (5*95=475); the share cap is clamped to
+            # target_trade_value, so a net-directional buy must fit inside budget.
+            "target_trade_value": 500.0,
             "limit_context": {"reference_price": 100.0, "candidate_levels": []},
         }
         sell_order = {

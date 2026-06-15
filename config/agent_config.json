@@ -19,6 +19,8 @@
     "min_trade_value": 500.0,
     "rebalance_band_pct": 0.015,
     "max_quote_age_minutes": 20.0,
+    "max_quote_age_minutes_extended": 180.0,
+    "max_quote_age_minutes_closed": 0.0,
     "limit_offset_bps": 15.0,
     "max_limit_offset_bps": 80.0
   }

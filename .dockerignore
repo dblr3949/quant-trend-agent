@@ -1,0 +1,13 @@
+.git
+.DS_Store
+.venv
+__pycache__/
+*.pyc
+
+config/openai.env
+config/portfolio.json
+data/*.csv
+data/live_quotes.json
+data/research_overlay.json
+reports/
+state/

@@ -1,4 +1,5 @@
 import csv
+import os
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
@@ -13,6 +14,19 @@ from quant_trend.market_data import Quote
 class AppServerTests(unittest.TestCase):
     def test_default_provider_is_massive(self):
         self.assertEqual(DEFAULT_SETTINGS["provider"], "massive")
+
+    def test_app_data_dir_moves_mutable_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "app"
+            storage = Path(tmp) / "storage"
+            root.mkdir()
+
+            with patch.dict(os.environ, {"APP_DATA_DIR": str(storage)}):
+                app = AgentApp(root)
+
+        self.assertEqual(app.storage_root, storage.resolve())
+        self.assertEqual(app.state_path, storage.resolve() / "state" / "agent_app_state.json")
+        self.assertEqual(app.data_dir, storage.resolve() / "data")
 
     def test_fetch_quotes_uses_massive_without_falling_through(self):
         class FakeMassiveClient:

@@ -43,7 +43,18 @@ class AgentTests(unittest.TestCase):
         snapshot = build_snapshot("MU", bars, quote)
 
         self.assertEqual(snapshot.price, 981.61)
-        self.assertEqual(snapshot.source, "daily_close:ibkr_close_tick_ignored")
+        self.assertEqual(snapshot.source, "daily_close:stale_close_ignored")
+
+    def test_massive_prev_close_quote_falls_back_to_daily_close(self):
+        bars = [Bar(date(2026, 6, 12), 971.81, 1012.62, 960.19, 981.61, 40785200)]
+        quote = Quote("MU", 950.0, asof=None, source="massive:snapshot:prev_close")
+
+        snapshot = build_snapshot("MU", bars, quote)
+
+        # A prevDay close is always stale vs. the current session: use the daily close.
+        self.assertEqual(snapshot.price, 981.61)
+        self.assertEqual(snapshot.source, "daily_close:stale_close_ignored")
+        self.assertIsNone(snapshot.quote_age_minutes)
 
     def test_build_trade_plan_creates_sized_orders(self):
         with tempfile.TemporaryDirectory() as tmp:

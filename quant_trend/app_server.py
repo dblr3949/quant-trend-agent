@@ -1,5 +1,7 @@
+import base64
 import csv
 import copy
+import hmac
 import json
 import os
 import threading
@@ -50,7 +52,7 @@ DEFAULT_SETTINGS = {
     "ibkr_market_data_type": 1,
     "ibkr_timeout": 8.0,
     "fetch_intraday": True,
-    "intraday_bar_size": "5 mins",
+    "intraday_bar_size": "1 min",
     "intraday_duration": "1 D",
     "intraday_use_rth": False,
     "timezone": "Asia/Shanghai",
@@ -59,6 +61,11 @@ DEFAULT_SETTINGS = {
         {"label": "postmarket", "time": "05:10"},
     ],
 }
+
+
+def _storage_root(root: Path) -> Path:
+    raw = os.getenv("APP_DATA_DIR")
+    return Path(raw).expanduser().resolve() if raw else root
 
 
 def _looks_like_run_id(value: str) -> bool:
@@ -211,13 +218,15 @@ def _is_ibkr_info_message(message: str) -> bool:
 class AgentApp:
     def __init__(self, root: str | Path):
         self.root = Path(root)
-        self.state_path = self.root / APP_STATE
-        self.runs_dir = self.root / RUNS_DIR
+        self.storage_root = _storage_root(self.root)
+        self.storage_root.mkdir(parents=True, exist_ok=True)
+        self.state_path = self.storage_root / APP_STATE
+        self.runs_dir = self.storage_root / RUNS_DIR
         self.config_path = self.root / "config/agent_config.json"
-        self.portfolio_path = self.root / "config/portfolio.json"
-        self.quotes_path = self.root / "data/live_quotes.json"
-        self.research_path = self.root / "data/research_overlay.json"
-        self.data_dir = self.root / "data"
+        self.portfolio_path = self.storage_root / "config/portfolio.json"
+        self.quotes_path = self.storage_root / "data/live_quotes.json"
+        self.research_path = self.storage_root / "data/research_overlay.json"
+        self.data_dir = self.storage_root / "data"
         self.web_dir = self.root / "web"
         self.lock = threading.Lock()
         self.run_lock = threading.Lock()
@@ -684,6 +693,7 @@ class AgentApp:
                 symbols = _symbols_for_run(config, portfolio)
                 settings = {**state.get("settings", {}), **payload.get("settings", {})}
                 provider = payload.get("provider") or settings.get("provider", "massive")
+                llm_model = str(payload.get("model") or settings.get("llm_model") or "").strip() or None
                 self._progress_step("确认股票池", f"本轮覆盖 {len(symbols)} 个标的：{', '.join(symbols)}。", {"标的数": len(symbols)})
 
                 history_source = "Massive/Polygon" if provider == "massive" else "Yahoo Chart"
@@ -745,6 +755,7 @@ class AgentApp:
                     "id": run_id,
                     "kind": kind,
                     "provider": provider,
+                    "model": llm_model or os.getenv("OPENAI_MODEL", "gpt-5.5"),
                     "prompt": prompt,
                     "created_at": _now_iso(),
                 }
@@ -764,7 +775,7 @@ class AgentApp:
                     "decision_factors": plan["decision_context"],
                 }
                 self._progress_step("LLM 点位复核", "把候选支撑/压力、筹码占比、指数趋势和风控输入 LLM；只允许从候选价中选择。", {"状态": "开始"})
-                llm_limit_decisions = apply_llm_limit_decisions(plan)
+                llm_limit_decisions = apply_llm_limit_decisions(plan, model=llm_model)
                 if llm_limit_decisions:
                     plan["llm_limit_decisions"] = llm_limit_decisions
                     applied_count = len(llm_limit_decisions.get("applied", []))
@@ -776,7 +787,7 @@ class AgentApp:
                 else:
                     self._progress_step("LLM 点位复核跳过", "未配置 LLM 或本轮没有候选挂单，保留后端确定性点位。", {"采用点位": 0})
                 self._progress_step("生成重点总结", "把量价点位、当日趋势、仓位约束和弱覆盖因子交给 LLM，生成 500 字内中文摘要。", {"状态": "开始"})
-                plan["executive_summary"] = build_executive_summary(plan)
+                plan["executive_summary"] = build_executive_summary(plan, model=llm_model)
                 plan["llm_usage"] = _collect_llm_usage(plan)
                 self._progress_step("保存记录", f"准备保存到 {path.name}。", {"建议单数": len(plan.get("orders", []))})
                 progress = self.get_progress()
@@ -836,6 +847,32 @@ def make_handler(app: AgentApp):
         def log_message(self, format, *args):  # noqa: A003
             return
 
+        def _authorized(self) -> bool:
+            expected_password = os.getenv("APP_PASSWORD")
+            if not expected_password:
+                return True
+            header = self.headers.get("Authorization", "")
+            if not header.startswith("Basic "):
+                return False
+            try:
+                decoded = base64.b64decode(header.removeprefix("Basic ").strip()).decode("utf-8")
+            except Exception:
+                return False
+            username, separator, password = decoded.partition(":")
+            if not separator:
+                return False
+            expected_username = os.getenv("APP_USERNAME", "agent")
+            return hmac.compare_digest(username, expected_username) and hmac.compare_digest(password, expected_password)
+
+        def _auth_challenge(self):
+            body = b"Authentication required"
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Semis Position Agent"')
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _json(self, payload, status: int = 200):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -861,6 +898,12 @@ def make_handler(app: AgentApp):
             parsed = urlparse(self.path)
             path = parsed.path
             try:
+                if path == "/healthz":
+                    self._json({"ok": True, "storage_root": str(app.storage_root), "auth": bool(os.getenv("APP_PASSWORD"))})
+                    return
+                if not self._authorized():
+                    self._auth_challenge()
+                    return
                 if path == "/api/state":
                     state = app.load_state()
                     latest = app.latest_run()
@@ -895,6 +938,9 @@ def make_handler(app: AgentApp):
         def do_POST(self):  # noqa: N802
             path = urlparse(self.path).path
             try:
+                if not self._authorized():
+                    self._auth_challenge()
+                    return
                 payload = self._read_json()
                 if path == "/api/portfolio/save":
                     self._json({"portfolio": app.save_portfolio_payload(payload.get("portfolio", payload))})
