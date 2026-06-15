@@ -3,10 +3,15 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-from quant_trend.market_data import AlpacaDataClient, IBKRDataClient, fetch_yfinance_quotes, save_quotes
+from quant_trend.env_loader import load_env_file
+from quant_trend.market_data import AlpacaDataClient, IBKRDataClient, MassiveDataClient, fetch_yfinance_quotes, save_quotes
 from quant_trend.watchlist import load_watchlist
+
+
+load_env_file(ROOT / "config" / "openai.env")
 
 
 def _parse_symbols(value: str | None, watchlist: str | None) -> list[str]:
@@ -26,7 +31,7 @@ def _parse_symbols(value: str | None, watchlist: str | None) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", choices=["alpaca", "ibkr", "yfinance"], default="ibkr")
+    parser.add_argument("--provider", choices=["massive", "alpaca", "ibkr", "yfinance"], default="massive")
     parser.add_argument("--symbols", help="Comma-separated symbols, e.g. MU,AAOI,SPY,SMH,SOXX,VIXY")
     parser.add_argument("--watchlist")
     parser.add_argument("--feed", help="Alpaca feed, usually sip for consolidated data or iex for basic testing")
@@ -40,6 +45,8 @@ def main() -> int:
         help="1 live, 2 frozen, 3 delayed, 4 delayed frozen; default IBKR_MARKET_DATA_TYPE or 1",
     )
     parser.add_argument("--ibkr-timeout", type=float, default=8.0, help="Seconds to wait for IBKR snapshot quotes")
+    parser.add_argument("--massive-rest-url", default=None, help="Massive/Polygon proxy REST URL, default MASSIVE_REST_URL")
+    parser.add_argument("--massive-timeout", type=float, default=10.0, help="Seconds to wait for Massive REST requests")
     parser.add_argument("--output", default="data/live_quotes.json")
     args = parser.parse_args()
 
@@ -47,7 +54,14 @@ def main() -> int:
     if not symbols:
         raise SystemExit("Provide --symbols or --watchlist")
 
-    if args.provider == "alpaca":
+    if args.provider == "massive":
+        client = MassiveDataClient(base_url=args.massive_rest_url, timeout=args.massive_timeout)
+        quotes = client.fetch_latest_quotes(symbols)
+        if client.last_symbol_errors:
+            print("massive symbol errors:")
+            for symbol, errors in sorted(client.last_symbol_errors.items()):
+                print(f"- {symbol}: {'; '.join(errors)}")
+    elif args.provider == "alpaca":
         quotes = AlpacaDataClient(feed=args.feed).fetch_latest_quotes(symbols)
     elif args.provider == "ibkr":
         client = IBKRDataClient(

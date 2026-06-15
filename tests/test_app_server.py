@@ -6,10 +6,35 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quant_trend.agent import _current_market_snapshot_label
-from quant_trend.app_server import AgentApp, _latest_expected_us_daily_date
+from quant_trend.app_server import DEFAULT_SETTINGS, AgentApp, _latest_expected_us_daily_date
+from quant_trend.market_data import Quote
 
 
 class AppServerTests(unittest.TestCase):
+    def test_default_provider_is_massive(self):
+        self.assertEqual(DEFAULT_SETTINGS["provider"], "massive")
+
+    def test_fetch_quotes_uses_massive_without_falling_through(self):
+        class FakeMassiveClient:
+            last_messages = []
+            last_symbol_errors = {}
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def fetch_latest_quotes(self, symbols):
+                return {symbol: Quote(symbol, 100.0, source="massive:test") for symbol in symbols}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = AgentApp(root)
+            with patch("quant_trend.app_server.MassiveDataClient", FakeMassiveClient):
+                with patch("quant_trend.app_server.fetch_yfinance_quotes") as fallback:
+                    quotes = app.fetch_quotes("massive", ["MU"], {"massive_rest_url": "http://example.test"})
+
+        self.assertEqual(quotes["MU"].source, "massive:test")
+        fallback.assert_not_called()
+
     def test_refresh_history_updates_stale_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

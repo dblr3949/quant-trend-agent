@@ -16,6 +16,7 @@
         <label class="field compact" title="只决定行情从哪里读取；持仓仍然只来自你在本页保存的 BBAE 持仓。">
           <span>行情源 <span class="hint" title="只读行情源，不读取任何券商持仓或订单。">?</span></span>
           <select id="provider">
+            <option value="massive">Massive/Polygon 实时行情</option>
             <option value="yahoo_chart">Yahoo 日线快照</option>
             <option value="yfinance">Yahoo 兜底</option>
             <option value="file">本地报价文件</option>
@@ -36,6 +37,37 @@
     </header>
 
     <main class="workspace">
+      <section id="massiveSettings" class="ibkr-panel">
+        <div class="section-head">
+          <h2>Massive/Polygon 行情设置</h2>
+          <span class="pill">默认主行情源 · 只读行情</span>
+        </div>
+        <p class="safety-note">
+          当前使用 Massive 中转的 Polygon REST：按单标的读取快照、日线和分钟线；不做全市场 snapshot、批量全量、Flat Files 或期权全链 quotes。密钥只从本地 <code>config/openai.env</code> 读取，不会显示在网页或进入 git。
+        </p>
+        <div class="button-row ibkr-actions">
+          <button id="testMassiveBtn" type="button" title="只测试 Massive/Polygon 行情快照接口，不读取任何券商账户，也不会下单。">测试 Massive 行情</button>
+          <span id="massiveTestResult" class="inline-result">未测试</span>
+        </div>
+        <details class="advanced-settings">
+          <summary>高级设置</summary>
+          <div class="ibkr-grid massive-grid">
+            <label class="field" title="Massive REST 代理地址，路径兼容 Polygon REST API。">
+              <span>REST 地址 <span class="hint" title="默认使用本地配置里的 Massive REST 地址；这里不填写密钥。">?</span></span>
+              <input id="massiveRestUrl" type="text" />
+            </label>
+            <label class="field" title="WebSocket 地址仅作记录；当前跑批使用 REST，避免占用标准版唯一 WebSocket 连接。">
+              <span>WS 地址 <span class="hint" title="暂不常驻连接；之后需要实时推送再单独打开。">?</span></span>
+              <input id="massiveWsUrl" type="text" />
+            </label>
+            <label class="field" title="Massive REST 请求超时秒数。标的多或网络慢时可调大。">
+              <span>超时秒数 <span class="hint" title="单次 REST 请求等待时间，默认 10 秒。">?</span></span>
+              <input id="massiveTimeout" type="number" step="0.5" min="1" />
+            </label>
+          </div>
+        </details>
+      </section>
+
       <section id="ibkrSettings" class="ibkr-panel" hidden>
         <div class="section-head">
           <h2>IBKR 行情设置</h2>
@@ -77,34 +109,37 @@
               <input id="ibkrTimeout" type="number" step="0.5" min="1" />
             </label>
           </div>
-          <div class="section-head intraday-head">
-            <h2>当日行情</h2>
-            <span class="pill" title="用于捕捉开盘至当前的趋势，不参与任何自动下单。">分钟线评分</span>
-          </div>
-          <div class="ibkr-grid">
-            <label class="toggle" title="打开后每次生成建议都会读取当日分钟线，并计算 VWAP、近 30 分钟和区间位置。">
-              <input id="fetchIntraday" type="checkbox" checked />
-              <span>读取当日分钟线 <span class="hint" title="IBKR 为首选；非 IBKR 行情源会用 Yahoo 兜底。">?</span></span>
-            </label>
-            <label class="field" title="分钟线越细越灵敏，也越慢；5 分钟适合盘中仓位管理。">
-              <span>粒度 <span class="hint" title="默认 5 分钟；极短线可切到 1 分钟。">?</span></span>
-              <select id="intradayBarSize">
-                <option value="1 min">1 分钟</option>
-                <option value="5 mins">5 分钟</option>
-                <option value="15 mins">15 分钟</option>
-                <option value="30 mins">30 分钟</option>
-              </select>
-            </label>
-            <label class="field" title="1 D 通常覆盖最近一个交易日；若盘前也想看，保持扩展时段打开。">
-              <span>范围 <span class="hint" title="IBKR durationStr，默认 1 D。">?</span></span>
-              <input id="intradayDuration" type="text" />
-            </label>
-            <label class="toggle" title="关闭时包含盘前/盘后；打开时只看美股正常交易时段。">
-              <input id="intradayUseRth" type="checkbox" />
-              <span>只看正常时段 <span class="hint" title="关闭更适合盘前/盘后观察流动性。">?</span></span>
-            </label>
-          </div>
         </details>
+      </section>
+
+      <section id="intradaySettings" class="ibkr-panel">
+        <div class="section-head">
+          <h2>当日行情</h2>
+          <span class="pill" title="用于捕捉开盘至当前的趋势，不参与任何自动下单。">分钟线评分</span>
+        </div>
+        <div class="ibkr-grid">
+          <label class="toggle" title="打开后每次生成建议都会读取当日分钟线，并计算 VWAP、近 30 分钟和区间位置。">
+            <input id="fetchIntraday" type="checkbox" checked />
+            <span>读取当日分钟线 <span class="hint" title="Massive/Polygon 为默认；IBKR 和 Yahoo 只作为可选兜底。">?</span></span>
+          </label>
+          <label class="field" title="分钟线越细越灵敏，也越慢；5 分钟适合盘中仓位管理。">
+            <span>粒度 <span class="hint" title="默认 5 分钟；极短线可切到 1 分钟。">?</span></span>
+            <select id="intradayBarSize">
+              <option value="1 min">1 分钟</option>
+              <option value="5 mins">5 分钟</option>
+              <option value="15 mins">15 分钟</option>
+              <option value="30 mins">30 分钟</option>
+            </select>
+          </label>
+          <label class="field" title="1 D 通常覆盖最近一个交易日；Massive 会向前多取几个自然日，再只保留最近美股交易日。">
+            <span>范围 <span class="hint" title="默认 1 D；盘后/周末会展示最近一个有分钟线的美股交易日。">?</span></span>
+            <input id="intradayDuration" type="text" />
+          </label>
+          <label class="toggle" title="IBKR 可按正常时段过滤；Massive REST 当前按接口返回的聚合分钟线过滤最近交易日。">
+            <input id="intradayUseRth" type="checkbox" />
+            <span>只看正常时段 <span class="hint" title="对 IBKR 生效；Massive 先保留接口返回的最近交易日分钟线。">?</span></span>
+          </label>
+        </div>
       </section>
 
       <section class="portfolio-panel">

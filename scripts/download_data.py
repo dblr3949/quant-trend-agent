@@ -4,9 +4,14 @@ import csv
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-from quant_trend.market_data import AlpacaDataClient
+from quant_trend.env_loader import load_env_file
+from quant_trend.market_data import AlpacaDataClient, MassiveDataClient
+
+
+load_env_file(ROOT / "config" / "openai.env")
 
 
 def _row_value(row, column: str):
@@ -17,6 +22,9 @@ def _row_value(row, column: str):
 
 
 def download_us(symbol: str, start: str, end: str | None, provider: str = "yfinance", feed: str | None = None):
+    if provider == "massive":
+        return MassiveDataClient().fetch_daily_bars(symbol, start, end)
+
     if provider == "alpaca":
         return AlpacaDataClient(feed=feed).fetch_daily_bars(symbol, start, end)
 
@@ -71,7 +79,7 @@ def main() -> int:
     parser.add_argument("--start", default="2023-01-01")
     parser.add_argument("--end")
     parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--provider", choices=["yfinance", "alpaca"], default="yfinance")
+    parser.add_argument("--provider", choices=["massive", "yfinance", "alpaca"], default="massive")
     parser.add_argument("--feed", help="Alpaca feed, usually sip or iex")
     args = parser.parse_args()
 

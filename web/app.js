@@ -269,8 +269,10 @@ function labelSide(value) {
   return sideLabels[value] || value || "-";
 }
 
-function toggleIbkrSettings() {
-  $("ibkrSettings").hidden = $("provider").value !== "ibkr";
+function toggleMarketDataSettings() {
+  const provider = $("provider").value;
+  $("massiveSettings").hidden = provider !== "massive";
+  $("ibkrSettings").hidden = provider !== "ibkr";
 }
 
 function currentSettingsFromForm() {
@@ -278,6 +280,9 @@ function currentSettingsFromForm() {
     provider: $("provider").value,
     refresh_history: $("refreshHistory").checked,
     schedule_enabled: $("scheduleEnabled").checked,
+    massive_rest_url: $("massiveRestUrl").value || "http://44.219.45.87:8081",
+    massive_ws_url: $("massiveWsUrl").value || "ws://44.219.45.87:8080/ws",
+    massive_timeout: Number($("massiveTimeout").value || 10),
     ibkr_host: $("ibkrHost").value || "127.0.0.1",
     ibkr_port: Number($("ibkrPort").value || 4002),
     ibkr_client_id: Number($("ibkrClientId").value || 81),
@@ -383,6 +388,12 @@ function translateError(message) {
   if (text.includes("IBKR 未返回任何行情")) {
     return text.replace("IBKR 未返回任何行情。", "IBKR 未返回任何行情。");
   }
+  if (text.includes("Missing MASSIVE_API_KEY")) {
+    return "缺少 Massive API Key。请在本地 config/openai.env 里配置 MASSIVE_API_KEY 后重启服务。";
+  }
+  if (text.includes("Massive/Polygon 未返回任何行情")) {
+    return text;
+  }
   if (text.includes("Timed out connecting to IBKR")) {
     return "连接 IBKR 超时。请确认 Gateway/TWS 已登录、API 已启用、端口填写正确。";
   }
@@ -407,6 +418,11 @@ function setRunBusy(value) {
 function setIbkrTestBusy(value) {
   $("testIbkrBtn").disabled = value;
   $("testIbkrBtn").textContent = value ? "测试中..." : "测试 IBKR 行情";
+}
+
+function setMassiveTestBusy(value) {
+  $("testMassiveBtn").disabled = value;
+  $("testMassiveBtn").textContent = value ? "测试中..." : "测试 Massive 行情";
 }
 
 function emptyPortfolio() {
@@ -677,7 +693,7 @@ function renderResearchFlow(process) {
     {
       title: "1. 持仓与账户输入",
       status: processStatusBadge("手动表格", "ok"),
-      body: "持仓、成本、状态、信心、桶、约束、账户净值、现金、融资、维持保证金和目标杠杆只来自网页/本地输入；IBKR 不读取账户。",
+      body: "持仓、成本、状态、信心、桶、约束、账户净值、现金、融资、维持保证金和目标杠杆只来自网页/本地输入；行情源不读取账户。",
       metrics: [
         processMetric("持仓来源", sourceStatus(sources, "portfolio", "BBAE 手动", "未记录")),
         processMetric("自然语言持仓", "禁用", "预留入口，暂未接入 LLM；本轮不参与计算。"),
@@ -691,9 +707,9 @@ function renderResearchFlow(process) {
       metrics: [
         processMetric("行情源", sourceStatus(sources, "market_data", "已读取", "缺失")),
         processMetric("历史日线", sourceStatus(sources, "historical_daily", "已检查", "缺失")),
-        processMetric("当日分钟线", hasIntraday ? "已接入" : "本轮缺失", "IBKR HMDS 若不可用，会在 warning 里显示。"),
+        processMetric("当日分钟线", hasIntraday ? "已接入" : "本轮缺失", "Massive 为默认；IBKR/Yahoo 作为可选兜底，异常会在 warning 里显示。"),
       ],
-      method: "IBKR 只调用 market data；Yahoo Chart 只作日线/兜底数据源，不视为实盘行情源。",
+      method: "Massive/Polygon 按单标的拉取快照、日线和分钟线；IBKR 只调用 market data；Yahoo Chart 只作流程兜底。",
     },
     {
       title: "3. 量价结构主锚",
@@ -1423,9 +1439,12 @@ async function loadState() {
   const payload = await api("/api/state");
   appState = payload.state;
   latestRun = payload.latest_run;
-  $("provider").value = appState.settings.provider || "yahoo_chart";
+  $("provider").value = appState.settings.provider || "massive";
   $("refreshHistory").checked = appState.settings.refresh_history !== false;
   $("scheduleEnabled").checked = !!appState.settings.schedule_enabled;
+  $("massiveRestUrl").value = appState.settings.massive_rest_url || "http://44.219.45.87:8081";
+  $("massiveWsUrl").value = appState.settings.massive_ws_url || "ws://44.219.45.87:8080/ws";
+  $("massiveTimeout").value = appState.settings.massive_timeout || 10;
   $("ibkrHost").value = appState.settings.ibkr_host || "127.0.0.1";
   $("ibkrPort").value = appState.settings.ibkr_port || 4002;
   $("ibkrClientId").value = appState.settings.ibkr_client_id || 81;
@@ -1435,7 +1454,7 @@ async function loadState() {
   $("intradayBarSize").value = appState.settings.intraday_bar_size || "5 mins";
   $("intradayDuration").value = appState.settings.intraday_duration || "1 D";
   $("intradayUseRth").checked = !!appState.settings.intraday_use_rth;
-  toggleIbkrSettings();
+  toggleMarketDataSettings();
   setPortfolioForm(appState.portfolio);
   renderRun(latestRun);
   renderHistory(payload.runs || []);
@@ -1496,6 +1515,26 @@ async function runPlan(kind = "manual") {
   } finally {
     stopProgressPolling();
     setRunBusy(false);
+  }
+}
+
+async function testMassiveQuotes() {
+  setMassiveTestBusy(true);
+  $("massiveTestResult").textContent = "正在测试 Massive/Polygon REST 快照...";
+  try {
+    const payload = await api("/api/quotes/test", {
+      method: "POST",
+      body: JSON.stringify({ provider: "massive", settings: currentSettingsFromForm() }),
+    });
+    const sample = (payload.quotes || []).slice(0, 3).map((quote) => `${quote.symbol} ${quote.price}`).join("，");
+    $("massiveTestResult").textContent = `成功：返回 ${payload.quotes.length} 条行情${sample ? `（${sample}）` : ""}`;
+    setStatus("Massive 行情测试成功");
+  } catch (error) {
+    const message = translateError(error.message);
+    $("massiveTestResult").textContent = `失败：${message}`;
+    setStatus(`Massive 行情测试失败：${message}`);
+  } finally {
+    setMassiveTestBusy(false);
   }
 }
 
@@ -1940,7 +1979,8 @@ $("parseTextBtn").addEventListener("click", parseTextPortfolio);
 $("runBtn").addEventListener("click", () => runPlan("manual"));
 $("reloadBtn").addEventListener("click", loadState);
 $("saveSettingsBtn").addEventListener("click", saveSettings);
-$("provider").addEventListener("change", toggleIbkrSettings);
+$("provider").addEventListener("change", toggleMarketDataSettings);
+$("testMassiveBtn").addEventListener("click", testMassiveQuotes);
 $("testIbkrBtn").addEventListener("click", testIbkrQuotes);
 $("researchWindowClose").addEventListener("click", () => {
   $("researchWindow").hidden = true;

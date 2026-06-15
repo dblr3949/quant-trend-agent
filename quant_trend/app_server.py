@@ -15,6 +15,7 @@ from .market_data import (
     AlpacaDataClient,
     IBKRDataClient,
     IntradayBar,
+    MassiveDataClient,
     fetch_yahoo_chart_daily_rows,
     fetch_yahoo_chart_intraday_rows,
     fetch_yahoo_chart_quotes,
@@ -37,9 +38,12 @@ APP_STATE = "state/agent_app_state.json"
 RUNS_DIR = "reports/agent_runs"
 RUN_ID_LENGTH = 22
 DEFAULT_SETTINGS = {
-    "provider": "yahoo_chart",
+    "provider": "massive",
     "refresh_history": True,
     "schedule_enabled": False,
+    "massive_rest_url": "http://44.219.45.87:8081",
+    "massive_ws_url": "ws://44.219.45.87:8080/ws",
+    "massive_timeout": 10.0,
     "ibkr_host": "127.0.0.1",
     "ibkr_port": 4002,
     "ibkr_client_id": 81,
@@ -303,23 +307,34 @@ class AgentApp:
             "previous_orders": previous.get("orders", []),
         }
 
-    def refresh_history(self, symbols: list[str], expected_latest: date | None = None) -> list[str]:
+    def refresh_history(self, symbols: list[str], expected_latest: date | None = None, provider: str | None = None, settings: dict | None = None) -> list[str]:
         warnings = []
         expected_latest = expected_latest or _latest_expected_us_daily_date()
+        settings = settings or {}
+        massive_client = None
+        if provider == "massive":
+            try:
+                massive_client = MassiveDataClient(
+                    base_url=str(settings.get("massive_rest_url") or "http://44.219.45.87:8081"),
+                    timeout=float(settings.get("massive_timeout") or 10.0),
+                )
+            except Exception as exc:
+                warnings.append(f"Massive 日线客户端初始化失败，改用 Yahoo Chart: {exc}")
         for symbol in symbols:
             path = self.data_dir / f"{symbol}.csv"
             local_last = _last_csv_date(path)
             if local_last is not None and local_last >= expected_latest:
                 continue
             try:
-                rows = fetch_yahoo_chart_daily_rows(symbol)
+                rows = massive_client.fetch_daily_bars(symbol, "2023-01-01") if massive_client else fetch_yahoo_chart_daily_rows(symbol)
                 if rows:
                     write_daily_rows(path, rows)
                     fetched_last = _last_csv_date(path)
                     if fetched_last and fetched_last < expected_latest:
                         warnings.append(f"{symbol}: 日线只到 {fetched_last.isoformat()}，预期最近交易日约 {expected_latest.isoformat()}")
                 else:
-                    warnings.append(f"{symbol}: no yahoo chart daily history returned")
+                    source_name = "Massive/Polygon" if massive_client else "Yahoo Chart"
+                    warnings.append(f"{symbol}: {source_name} daily history returned no rows")
             except Exception as exc:
                 stale = f"，本地只到 {local_last.isoformat()}" if local_last else ""
                 warnings.append(f"{symbol}: history refresh failed{stale}: {exc}")
@@ -329,7 +344,20 @@ class AgentApp:
         settings = settings or {}
         if provider == "file":
             return load_quotes(self.quotes_path)
-        if provider == "ibkr":
+        if provider == "massive":
+            client = MassiveDataClient(
+                base_url=str(settings.get("massive_rest_url") or "http://44.219.45.87:8081"),
+                timeout=float(settings.get("massive_timeout") or 10.0),
+            )
+            quotes = client.fetch_latest_quotes(symbols)
+            if not quotes:
+                details = []
+                details.extend(client.last_messages)
+                for symbol, errors in sorted(client.last_symbol_errors.items()):
+                    details.append(f"{symbol}: {'; '.join(errors)}")
+                suffix = f" 详情：{' | '.join(details)}" if details else ""
+                raise RuntimeError(f"Massive/Polygon 未返回任何行情。请检查 MASSIVE_API_KEY、套餐额度、REST 地址或网络。{suffix}")
+        elif provider == "ibkr":
             client = IBKRDataClient(
                 host=str(settings.get("ibkr_host") or "127.0.0.1"),
                 port=int(settings.get("ibkr_port") or 4002),
@@ -386,6 +414,19 @@ class AgentApp:
                 warnings.append(f"当日分钟线缺失: {', '.join(missing)}")
             return bars, warnings
 
+        if provider == "massive":
+            client = MassiveDataClient(
+                base_url=str(settings.get("massive_rest_url") or "http://44.219.45.87:8081"),
+                timeout=float(settings.get("massive_timeout") or 10.0),
+            )
+            bars = client.fetch_intraday_bars(symbols, duration=duration, bar_size=bar_size)
+            for symbol, errors in sorted(client.last_symbol_errors.items()):
+                warnings.append(f"{symbol}: Massive 分钟线错误: {'; '.join(errors)}")
+            missing = sorted(set(symbols) - set(bars))
+            if missing:
+                warnings.append(f"Massive 当日分钟线缺失: {', '.join(missing)}")
+            return bars, warnings
+
         if provider in {"yahoo_chart", "yfinance"}:
             interval = {"1 min": "1m", "5 mins": "5m", "15 mins": "15m", "30 mins": "30m"}.get(bar_size, "5m")
             bars = {}
@@ -418,7 +459,7 @@ class AgentApp:
     def test_quotes(self, payload: dict) -> dict:
         state = self.load_state()
         settings = {**state.get("settings", {}), **payload.get("settings", {})}
-        provider = payload.get("provider") or settings.get("provider", "ibkr")
+        provider = payload.get("provider") or settings.get("provider", "massive")
         config = load_agent_config(self.config_path)
         symbols = sorted(set(config.get("symbols", [])) | set(config.get("market_proxies", [])) | set(config.get("base_target_weights", {})))
         quotes = self.fetch_quotes(provider, symbols, settings)
@@ -561,10 +602,15 @@ class AgentApp:
         sources = [
             {"name": "BBAE 手动持仓", "type": "portfolio", "usage": "由你在网页表格/自然语言输入，作为唯一持仓来源。"},
             {"name": f"{provider} 实时/快照行情", "type": "market_data", "usage": "用于价格、买卖限价和当前市值计算。"},
-            {"name": "Yahoo Chart 日线", "type": "historical_daily", "usage": "补齐本地日线 CSV，用于近5/10/20日支撑压力、20日量比、高量区、均线和趋势。"},
+            {"name": "Massive/Polygon 日线" if provider == "massive" else "Yahoo Chart 日线", "type": "historical_daily", "usage": "补齐本地日线 CSV，用于近5/10/20日支撑压力、20日量比、高量区、均线和趋势。"},
         ]
         if intraday_count:
-            source_name = "IBKR 当日分钟线" if provider == "ibkr" else "Yahoo 当日分钟线兜底"
+            if provider == "ibkr":
+                source_name = "IBKR 当日分钟线"
+            elif provider == "massive":
+                source_name = "Massive/Polygon 当日分钟线"
+            else:
+                source_name = "Yahoo 当日分钟线兜底"
             sources.append({"name": source_name, "type": "intraday", "usage": "用于开盘至今、VWAP、近 30 分钟趋势和日内区间评分。"})
         if prompt.strip():
             sources.append({"name": "本次自然语言 prompt", "type": "manual_prompt", "usage": "解析为软/硬约束、宏观谨慎偏置和个股偏置。"})
@@ -572,6 +618,8 @@ class AgentApp:
             sources.append({"name": "data/research_overlay.json", "type": "manual_research_overlay", "usage": "本地研究/事件弱覆盖层；数据源未自动化前，只作为辅助偏置，不作为主因。"})
         if provider == "ibkr":
             sources.append({"name": "IBKR 安全边界", "type": "guardrail", "usage": "只调用行情接口，不读账户、持仓、订单、成交，不下单。"})
+        if provider == "massive":
+            sources.append({"name": "Massive 套餐边界", "type": "guardrail", "usage": "REST 按单标的查询；不做全市场 snapshot、Flat Files 或批量全量请求。"})
         if os.getenv("OPENAI_API_KEY"):
             sources.append({"name": "OpenAI 候选点位复核", "type": "llm_candidate_selector", "usage": "只在后端生成的候选支撑/压力价中选择，不允许 LLM 编造新价格。"})
         return sources
@@ -579,6 +627,12 @@ class AgentApp:
     def _decision_factors(self, plan: dict, research: dict, prompt: str, provider: str) -> list[dict]:
         portfolio = plan.get("portfolio", {})
         events = [event for event in research.get("events", []) if isinstance(event, dict)]
+        if provider == "ibkr":
+            provider_detail = "IBKR 仅用于行情；不读账户、持仓、订单、成交，也不会下单。"
+        elif provider == "massive":
+            provider_detail = "Massive/Polygon 仅用于行情；持仓、保证金和 prompt 只来自网页/本地输入。"
+        else:
+            provider_detail = "行情源仅用于价格/历史数据；持仓、保证金和 prompt 只来自网页/本地输入。"
         return [
             {
                 "name": "近期量价技术面",
@@ -608,7 +662,7 @@ class AgentApp:
                 "name": "行情来源边界",
                 "weight": "数据质量",
                 "status": provider,
-                "detail": "IBKR 仅行情只读；持仓、保证金和 prompt 只来自网页/本地输入。",
+                "detail": provider_detail,
             },
         ]
 
@@ -620,7 +674,7 @@ class AgentApp:
         self._start_progress(run_id, kind, prompt)
         try:
             with self.lock:
-                self._progress_step("读取持仓", "读取网页表格里的 BBAE 持仓；不会读取 IBKR 账户。", {"边界": "只用本地持仓"})
+                self._progress_step("读取持仓", "读取网页表格里的 BBAE 持仓；不会读取任何券商账户。", {"边界": "只用本地持仓"})
                 state = self.load_state()
                 portfolio_payload = payload.get("portfolio") or state.get("portfolio")
                 if not portfolio_payload:
@@ -629,11 +683,12 @@ class AgentApp:
                 config = load_agent_config(self.config_path)
                 symbols = _symbols_for_run(config, portfolio)
                 settings = {**state.get("settings", {}), **payload.get("settings", {})}
-                provider = payload.get("provider") or settings.get("provider", "yfinance")
+                provider = payload.get("provider") or settings.get("provider", "massive")
                 self._progress_step("确认股票池", f"本轮覆盖 {len(symbols)} 个标的：{', '.join(symbols)}。", {"标的数": len(symbols)})
 
-                self._progress_step("补齐历史日线", "检查本地 CSV；缺少或过旧时用 Yahoo Chart 刷新，用于均线/ATR/趋势。", {"状态": "开始"})
-                history_warnings = self.refresh_history(symbols) if payload.get("refresh_history", settings.get("refresh_history", True)) else []
+                history_source = "Massive/Polygon" if provider == "massive" else "Yahoo Chart"
+                self._progress_step("补齐历史日线", f"检查本地 CSV；缺少或过旧时用 {history_source} 刷新，用于均线/ATR/趋势。", {"状态": "开始"})
+                history_warnings = self.refresh_history(symbols, provider=provider, settings=settings) if payload.get("refresh_history", settings.get("refresh_history", True)) else []
                 if provider == "yahoo_chart":
                     history_warnings.append("yahoo_chart is a baseline/daily snapshot provider, not a real-time trading feed.")
                 self._progress_step("历史日线完成", f"日线检查完成，提示 {len(history_warnings)} 条。", {"提示数": len(history_warnings)})

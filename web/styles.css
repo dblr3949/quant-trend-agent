@@ -409,6 +409,10 @@ td select {
   gap: 10px;
 }
 
+.massive-grid {
+  grid-template-columns: minmax(260px, 1.5fr) minmax(260px, 1.5fr) minmax(120px, 0.5fr);
+}
+
 .intraday-head {
   margin-top: 14px;
 }

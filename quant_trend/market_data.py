@@ -4,10 +4,15 @@ import ssl
 import threading
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +204,281 @@ def fetch_yahoo_chart_quotes(symbols: list[str]) -> dict[str, Quote]:
             source="yahoo_chart",
         )
     return quotes
+
+
+def _float_or_none(value) -> float | None:
+    if value in (None, "", "NaN"):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _polygon_timestamp_to_datetime(value) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number > 1_000_000_000_000_000:
+        number = number / 1_000_000_000
+    elif number > 1_000_000_000_000:
+        number = number / 1000
+    try:
+        return datetime.fromtimestamp(number, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _polygon_timestamp_to_iso(value) -> str | None:
+    parsed = _polygon_timestamp_to_datetime(value)
+    return parsed.isoformat() if parsed else None
+
+
+def _polygon_bar_date(value) -> str:
+    parsed = _polygon_timestamp_to_datetime(value)
+    if not parsed:
+        return str(value)[:10]
+    return parsed.date().isoformat()
+
+
+def _polygon_market_date(value) -> str:
+    parsed = _polygon_timestamp_to_datetime(value)
+    if not parsed:
+        return str(value)[:10]
+    if ZoneInfo is None:
+        return parsed.date().isoformat()
+    return parsed.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+
+
+def _bar_size_to_polygon(bar_size: str) -> tuple[int, str]:
+    normalized = str(bar_size or "").strip().lower()
+    mapping = {
+        "1 min": (1, "minute"),
+        "1 mins": (1, "minute"),
+        "1 minute": (1, "minute"),
+        "5 min": (5, "minute"),
+        "5 mins": (5, "minute"),
+        "5 minutes": (5, "minute"),
+        "15 min": (15, "minute"),
+        "15 mins": (15, "minute"),
+        "15 minutes": (15, "minute"),
+        "30 min": (30, "minute"),
+        "30 mins": (30, "minute"),
+        "30 minutes": (30, "minute"),
+    }
+    return mapping.get(normalized, (5, "minute"))
+
+
+def _duration_to_calendar_days(duration: str) -> int:
+    match = str(duration or "1 D").strip().upper().split()
+    if len(match) >= 2:
+        try:
+            amount = int(float(match[0]))
+        except ValueError:
+            amount = 1
+        unit = match[1][0]
+        if unit == "W":
+            return max(1, amount * 7)
+        if unit == "M":
+            return max(1, amount * 31)
+        if unit == "Y":
+            return max(1, amount * 366)
+        return max(1, amount)
+    return 1
+
+
+class MassiveDataClient:
+    """Massive/Polygon proxy REST client for market data.
+
+    The proxy follows Polygon REST paths and authenticates with X-Proxy-Key.
+    This app uses REST for on-demand runs instead of opening a persistent
+    WebSocket so it does not occupy the single WebSocket connection allowed by
+    the standard plan.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float = 10.0,
+    ):
+        self.api_key = api_key or os.getenv("MASSIVE_API_KEY") or os.getenv("POLYGON_PROXY_KEY")
+        self.base_url = (base_url or os.getenv("MASSIVE_REST_URL") or "http://44.219.45.87:8081").rstrip("/")
+        self.timeout = timeout
+        self.last_messages: list[str] = []
+        self.last_symbol_errors: dict[str, list[str]] = {}
+        if not self.api_key:
+            raise ValueError("Missing MASSIVE_API_KEY for Massive/Polygon market data")
+
+    def _get_json(self, path: str, params: dict[str, str] | None = None) -> dict:
+        query = f"?{urlencode(params or {})}" if params else ""
+        url = f"{self.base_url}{path}{query}"
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "quant-trend-agent/1.0",
+                "X-Proxy-Key": self.api_key,
+                "X-API-KEY": self.api_key,
+            },
+        )
+        with urlopen(request, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _snapshot_quote(self, symbol: str, payload: dict) -> Quote | None:
+        ticker = payload.get("ticker") or payload.get("results") or payload
+        if not isinstance(ticker, dict):
+            return None
+        last_trade = ticker.get("lastTrade") or ticker.get("last_trade") or ticker.get("lastTradeDetails") or {}
+        last_quote = ticker.get("lastQuote") or ticker.get("last_quote") or {}
+        day = ticker.get("day") or {}
+        minute = ticker.get("min") or ticker.get("minute") or {}
+        prev_day = ticker.get("prevDay") or ticker.get("prev_day") or {}
+        bid = _float_or_none(last_quote.get("p") or last_quote.get("bid") or last_quote.get("bid_price"))
+        ask = _float_or_none(last_quote.get("P") or last_quote.get("ask") or last_quote.get("ask_price"))
+        midpoint = (bid + ask) / 2.0 if bid and ask else None
+        candidates = [
+            ("last", _float_or_none(last_trade.get("p") or last_trade.get("price"))),
+            ("day", _float_or_none(day.get("c") or day.get("close"))),
+            ("minute", _float_or_none(minute.get("c") or minute.get("close"))),
+            ("midpoint", midpoint),
+            ("ask", ask),
+            ("bid", bid),
+            ("prev_close", _float_or_none(prev_day.get("c") or prev_day.get("close"))),
+        ]
+        price_kind = "unknown"
+        price = None
+        for candidate_kind, candidate_price in candidates:
+            if candidate_price is not None:
+                price_kind = candidate_kind
+                price = candidate_price
+                break
+        if price is None:
+            return None
+        return Quote(
+            symbol=symbol.upper(),
+            price=float(price),
+            bid=bid,
+            ask=ask,
+            asof=datetime.now(timezone.utc).isoformat(),
+            source=f"massive:snapshot:{price_kind}",
+        )
+
+    def _last_trade_quote(self, symbol: str) -> Quote | None:
+        trade_payload = self._get_json(f"/v2/last/trade/{quote(symbol.upper(), safe='')}")
+        trade = trade_payload.get("results") or trade_payload.get("last") or {}
+        price = _float_or_none(trade.get("p") or trade.get("price"))
+        if price is None:
+            return None
+        return Quote(
+            symbol=symbol.upper(),
+            price=price,
+            asof=datetime.now(timezone.utc).isoformat(),
+            source="massive:last_trade",
+        )
+
+    def fetch_latest_quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        quotes: dict[str, Quote] = {}
+        self.last_messages = []
+        self.last_symbol_errors = {}
+        for symbol in [item.upper() for item in symbols]:
+            try:
+                payload = self._get_json(f"/v2/snapshot/locale/us/markets/stocks/tickers/{quote(symbol, safe='')}")
+                quote_item = self._snapshot_quote(symbol, payload)
+                if quote_item is None:
+                    quote_item = self._last_trade_quote(symbol)
+                if quote_item is not None:
+                    quotes[symbol] = quote_item
+                else:
+                    self.last_symbol_errors[symbol] = ["Massive snapshot returned no usable price"]
+            except Exception as exc:
+                try:
+                    quote_item = self._last_trade_quote(symbol)
+                    if quote_item is not None:
+                        quotes[symbol] = quote_item
+                        continue
+                except Exception as fallback_exc:
+                    self.last_symbol_errors[symbol] = [f"snapshot: {exc}", f"last_trade: {fallback_exc}"]
+                    continue
+                self.last_symbol_errors[symbol] = [str(exc)]
+        return quotes
+
+    def fetch_daily_bars(self, symbol: str, start: str, end: str | None = None) -> list[dict[str, float | str]]:
+        end_value = end or datetime.now(timezone.utc).date().isoformat()
+        payload = self._get_json(
+            f"/v2/aggs/ticker/{quote(symbol.upper(), safe='')}/range/1/day/{start}/{end_value}",
+            {"adjusted": "true", "sort": "asc", "limit": "50000"},
+        )
+        rows = []
+        for raw in payload.get("results") or []:
+            if not all(key in raw for key in ("o", "h", "l", "c")):
+                continue
+            rows.append(
+                {
+                    "date": _polygon_bar_date(raw.get("t")),
+                    "open": float(raw["o"]),
+                    "high": float(raw["h"]),
+                    "low": float(raw["l"]),
+                    "close": float(raw["c"]),
+                    "volume": float(raw.get("v") or 0),
+                }
+            )
+        return rows
+
+    def fetch_intraday_bars(
+        self,
+        symbols: list[str],
+        duration: str = "1 D",
+        bar_size: str = "5 mins",
+    ) -> dict[str, list[IntradayBar]]:
+        multiplier, timespan = _bar_size_to_polygon(bar_size)
+        calendar_days = max(5, _duration_to_calendar_days(duration) + 4)
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=calendar_days)
+        result: dict[str, list[IntradayBar]] = {}
+        self.last_symbol_errors = {}
+        for symbol in [item.upper() for item in symbols]:
+            try:
+                payload = self._get_json(
+                    f"/v2/aggs/ticker/{quote(symbol, safe='')}/range/{multiplier}/{timespan}/{start_date.isoformat()}/{end_date.isoformat()}",
+                    {"adjusted": "true", "sort": "asc", "limit": "50000"},
+                )
+                bar_pairs = []
+                for raw in payload.get("results") or []:
+                    if not all(key in raw for key in ("o", "h", "l", "c")):
+                        continue
+                    bar_pairs.append(
+                        (
+                            IntradayBar(
+                                symbol=symbol,
+                                timestamp=_polygon_timestamp_to_iso(raw.get("t")) or str(raw.get("t")),
+                                open=float(raw["o"]),
+                                high=float(raw["h"]),
+                                low=float(raw["l"]),
+                                close=float(raw["c"]),
+                                volume=float(raw.get("v") or 0),
+                                average=_float_or_none(raw.get("vw")),
+                                bar_count=int(raw["n"]) if raw.get("n") is not None else None,
+                                source=f"massive:{multiplier}:{timespan}",
+                            ),
+                            raw,
+                        )
+                    )
+                if bar_pairs:
+                    latest_day = max(_polygon_market_date(raw.get("t")) for _, raw in bar_pairs if raw.get("t") is not None)
+                    result[symbol] = [
+                        bar
+                        for bar, raw in bar_pairs
+                        if raw.get("t") is not None and _polygon_market_date(raw.get("t")) == latest_day
+                    ]
+                else:
+                    self.last_symbol_errors[symbol] = ["Massive minute aggregates returned no bars"]
+            except Exception as exc:
+                self.last_symbol_errors[symbol] = [str(exc)]
+        return result
 
 
 class AlpacaDataClient:

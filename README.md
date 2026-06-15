@@ -108,6 +108,7 @@ python3 scripts/paper_trade.py sell --symbol MU --price 130 --shares 5
 - 美股可安装 `yfinance`
 - A 股可安装 `akshare`
 - IBKR 实时行情可安装 `ibapi`，通过 TWS / IB Gateway 只读 Level I 快照
+- Massive/Polygon 中转行情可设置 `MASSIVE_API_KEY`，作为当前默认美股快照、日线和分钟线来源
 - 更可靠的美股实时/日线数据可使用 Alpaca Market Data，设置 `ALPACA_API_KEY`、`ALPACA_API_SECRET`，并优先使用 `ALPACA_DATA_FEED=sip`
 
 ```bash
@@ -201,15 +202,27 @@ MRVL 220股 成本78 intact 信心0.9
 
 ### 3. 拉实时报价
 
-生产用途建议用 IBKR / Alpaca SIP / Polygon 等付费合规源。你现在的约束是 IBKR 只看行情、不看账户、不看持仓、不下单，所以本项目的 IBKR 客户端只调用行情快照接口。
+当前默认使用 Massive/Polygon 中转 REST 作为美股快照、日线和分钟线来源。程序按单标的查询，不做全市场 snapshot、批量全量、Flat Files 或期权全链 quotes；持仓仍只来自你手动输入的 BBAE 表格，不读取任何券商账户。
 
-启动 TWS 或 IB Gateway 后，在 API 设置中启用 Socket 客户端，并确认端口：
+先在本地私密配置里填 Massive key：
 
-- TWS paper 常见端口：`7497`
-- TWS live 常见端口：`7496`
-- IB Gateway paper/live 端口可能不同，以本机设置为准
+```bash
+cp config/openai.env.example config/openai.env
+```
 
-默认拉 IBKR 行情：
+```env
+MASSIVE_API_KEY=REPLACE_WITH_MASSIVE_PROXY_KEY
+MASSIVE_REST_URL=http://44.219.45.87:8081
+MASSIVE_WS_URL=ws://44.219.45.87:8080/ws
+```
+
+默认拉 Massive 行情：
+
+```bash
+python3 scripts/fetch_quotes.py --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
+```
+
+IBKR 仍可作为备用。启动 TWS 或 IB Gateway 后，在 API 设置中启用 Socket 客户端，并确认端口：
 
 ```bash
 python3 scripts/fetch_quotes.py --provider ibkr \
@@ -227,17 +240,7 @@ python3 scripts/fetch_quotes.py --provider ibkr \
   --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
 ```
 
-也可以用环境变量固定设置：
-
-```bash
-export IBKR_HOST=127.0.0.1
-export IBKR_PORT=7497
-export IBKR_CLIENT_ID=81
-export IBKR_MARKET_DATA_TYPE=1
-python3 scripts/fetch_quotes.py --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
-```
-
-这个脚本不会调用账户/仓位/订单接口；你的真实仓位只来自 `config/portfolio.json`。
+IBKR 脚本不会调用账户/仓位/订单接口；你的真实仓位只来自 `config/portfolio.json` 或网页表格。
 
 Alpaca 仍可作为备用：
 
@@ -323,9 +326,10 @@ http://127.0.0.1:8765
 - 保存每次跑批记录到 `reports/agent_runs/`
 - 查看上一轮到本轮的持仓股数变化
 - 服务运行期间可开启盘前/盘后自动跑批
-- IBKR 只读行情设置和连接测试
+- Massive/Polygon 默认行情设置和连接测试
+- IBKR 只读行情设置和连接测试，作为备用
 
-默认 `Yahoo chart` 只适合 baseline 和流程调试，不是实时交易行情。正式使用建议切到付费行情源，或先用 `file` 读取你自己写入的 `data/live_quotes.json`。
+默认 Massive/Polygon 是主行情源。`Yahoo chart` 只适合 baseline 和流程调试，不是实时交易行情；`file` 可读取你自己写入的 `data/live_quotes.json`。
 
 ### OpenAI / Codex 配置
 
@@ -346,6 +350,9 @@ OPENAI_DECISION_REASONING_EFFORT=medium
 OPENAI_SUMMARY_REASONING_EFFORT=medium
 OPENAI_DECISION_VERBOSITY=low
 OPENAI_SUMMARY_VERBOSITY=medium
+MASSIVE_API_KEY=REPLACE_WITH_MASSIVE_PROXY_KEY
+MASSIVE_REST_URL=http://44.219.45.87:8081
+MASSIVE_WS_URL=ws://44.219.45.87:8080/ws
 ```
 
 默认使用 `gpt-5.5`。点位复核和重点总结默认都用 `medium` 推理档位；当前输入量下，这比 `high/xhigh` 更稳定地产出 JSON 价梯，也更可控。如果后续要单独拆模型，可以额外设置 `OPENAI_DECISION_MODEL` 或 `OPENAI_SUMMARY_MODEL`。
