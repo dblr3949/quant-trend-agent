@@ -1587,6 +1587,33 @@ td select {
   font-size: 12px;
 }
 
+.market-special-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.market-special-metrics span {
+  min-width: 0;
+  border: 1px solid #dbe9f0;
+  border-radius: 7px;
+  background: #f7fbfc;
+  color: #506677;
+  padding: 6px 7px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.market-special-metrics b {
+  display: block;
+  margin-top: 2px;
+  color: #142838;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .market-contribution-list {
   display: grid;
   gap: 6px;
@@ -1622,6 +1649,26 @@ td select {
 .market-contribution-list small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.component-extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.component-extra span {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  border: 1px solid #e0e8ee;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #4a5d6d;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .market-regime-note {

@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from pathlib import Path
@@ -104,6 +105,60 @@ def _vix_level_contribution(symbol: str, price: float) -> tuple[float, str, str]
     if price <= 22:
         return 1.0, "normal_vix", "VIX <= 22，波动率正常偏低，轻度加分。"
     return 0.0, "middle_vix", f"{symbol} 位于 22~25 中性区间。"
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _stddev(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    avg = sum(values) / len(values)
+    variance = sum((value - avg) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(max(0.0, variance))
+
+
+def _percentile_rank(values: list[float], value: float) -> float | None:
+    clean = [float(item) for item in values if item is not None and math.isfinite(float(item))]
+    if not clean:
+        return None
+    below = sum(1 for item in clean if item < value)
+    equal = sum(1 for item in clean if item == value)
+    return round(((below + equal * 0.5) / len(clean)) * 100.0, 1)
+
+
+def _pct_change_from_window(closes: list[float], price: float, window: int) -> float | None:
+    if len(closes) <= window:
+        return None
+    base = closes[-window - 1]
+    if base <= 0:
+        return None
+    return (price / base) - 1.0
+
+
+def _daily_returns(closes: list[float], price: float | None = None) -> list[float]:
+    series = [float(value) for value in closes if value and value > 0]
+    if price is not None and price > 0:
+        if not series:
+            series.append(float(price))
+        elif abs(series[-1] / float(price) - 1.0) > 0.0005:
+            series.append(float(price))
+    returns = []
+    for index in range(1, len(series)):
+        prev = series[index - 1]
+        current = series[index]
+        if prev > 0 and current > 0:
+            returns.append((current / prev) - 1.0)
+    return returns
+
+
+def _score_from_ratio(value: float | None, scale: float = 1.4, cap: float = 1.0) -> float:
+    if value is None or not math.isfinite(value):
+        return 0.0
+    return max(-cap, min(cap, float(value) / max(scale, 0.001)))
 
 
 def load_json(path: str | Path | None) -> dict:
@@ -318,12 +373,293 @@ def _intraday_reason(summary: dict | None) -> tuple[float, str | None]:
     return 1.0, "intraday_mixed"
 
 
-def classify_market_regime(snapshots: dict[str, TechnicalSnapshot], config: dict, research: dict, intraday: dict[str, dict] | None = None) -> dict:
+def _risk_adjusted_momentum_context(bars: list[Bar], price: float) -> dict:
+    closes = [bar.close for bar in bars if bar.close > 0]
+    returns = _daily_returns(closes, price)
+    weights = {20: 0.50, 60: 0.30, 120: 0.20}
+    horizons = []
+    weighted_score = 0.0
+    total_weight = 0.0
+    for window, weight in weights.items():
+        return_pct = _pct_change_from_window(closes, price, window)
+        recent_returns = returns[-window:]
+        daily_vol = _stddev(recent_returns)
+        period_vol = daily_vol * math.sqrt(window) if daily_vol is not None else None
+        risk_adjusted = (return_pct / period_vol) if return_pct is not None and period_vol and period_vol > 0 else None
+        horizon_score = _score_from_ratio(risk_adjusted, scale=1.35, cap=1.0)
+        if return_pct is not None:
+            weighted_score += horizon_score * weight
+            total_weight += weight
+        horizons.append(
+            {
+                "window": window,
+                "return_pct": round(return_pct, 5) if return_pct is not None else None,
+                "period_volatility_pct": round(period_vol, 5) if period_vol is not None else None,
+                "risk_adjusted_return": round(risk_adjusted, 4) if risk_adjusted is not None else None,
+                "score": round(horizon_score, 2),
+                "score_range": _score_meta(horizon_score, -1, 1),
+                "reference": f"{window}日收益 / {window}日实现波动率，越高说明趋势收益更抗噪音。",
+            }
+        )
+    score = weighted_score / total_weight if total_weight else 0.0
+    score = max(-2.0, min(2.0, score * 2.0))
+    label = "动量强" if score >= 1.0 else "动量偏强" if score >= 0.35 else "动量转弱" if score <= -0.6 else "动量中性"
+    return {
+        "label": label,
+        "score": round(score, 2),
+        "score_range": _score_meta(score, -2, 2),
+        "horizons": horizons,
+        "detail": "20/60/120日收益除以对应窗口实现波动率，再按 50%/30%/20% 加权。",
+    }
+
+
+def _range_volatility_context(bars: list[Bar], price: float, atr14: float | None = None, window: int = 20) -> dict:
+    recent = [bar for bar in bars[-window:] if bar.open > 0 and bar.high > 0 and bar.low > 0 and bar.close > 0]
+    if len(recent) < 5:
+        atr_pct = (atr14 / price) if atr14 and price else None
+        return {
+            "window": window,
+            "atr_pct": round(atr_pct, 5) if atr_pct is not None else None,
+            "blended_daily_pct": round(atr_pct, 5) if atr_pct is not None else None,
+            "score": 0.0,
+            "score_range": _score_meta(0, -1, 1),
+            "detail": "日线不足，暂只保留 ATR。",
+        }
+    parkinson_terms = []
+    garman_klass_terms = []
+    rogers_satchell_terms = []
+    overnight_returns = []
+    open_close_returns = []
+    for index, bar in enumerate(recent):
+        hl = math.log(bar.high / bar.low)
+        co = math.log(bar.close / bar.open)
+        parkinson_terms.append((hl * hl) / (4.0 * math.log(2.0)))
+        gk = 0.5 * hl * hl - (2.0 * math.log(2.0) - 1.0) * co * co
+        garman_klass_terms.append(max(0.0, gk))
+        rs = math.log(bar.high / bar.open) * math.log(bar.high / bar.close) + math.log(bar.low / bar.open) * math.log(bar.low / bar.close)
+        rogers_satchell_terms.append(max(0.0, rs))
+        open_close_returns.append(co)
+        if index > 0 and recent[index - 1].close > 0:
+            overnight_returns.append(math.log(bar.open / recent[index - 1].close))
+
+    parkinson = math.sqrt(max(0.0, sum(parkinson_terms) / len(parkinson_terms)))
+    garman_klass = math.sqrt(max(0.0, sum(garman_klass_terms) / len(garman_klass_terms)))
+    rogers_satchell = math.sqrt(max(0.0, sum(rogers_satchell_terms) / len(rogers_satchell_terms)))
+    yang_zhang = None
+    if len(overnight_returns) >= 2 and len(open_close_returns) >= 2:
+        sigma_open = (_stddev(overnight_returns) or 0.0) ** 2
+        sigma_close = (_stddev(open_close_returns) or 0.0) ** 2
+        sigma_rs = sum(rogers_satchell_terms) / len(rogers_satchell_terms)
+        n = len(recent)
+        k = 0.34 / (1.34 + (n + 1) / max(1, n - 1))
+        yang_zhang = math.sqrt(max(0.0, sigma_open + k * sigma_close + (1 - k) * sigma_rs))
+    atr_pct = (atr14 / price) if atr14 and price else None
+    candidates = [value for value in [atr_pct, parkinson, garman_klass, yang_zhang] if value is not None and math.isfinite(value)]
+    blended = sum(candidates) / len(candidates) if candidates else None
+    score = 0.0
+    if blended is not None:
+        if blended >= 0.07:
+            score = -0.65
+        elif blended >= 0.045:
+            score = -0.25
+        elif blended <= 0.018:
+            score = 0.25
+    return {
+        "window": window,
+        "atr_pct": round(atr_pct, 5) if atr_pct is not None else None,
+        "parkinson_daily_pct": round(parkinson, 5),
+        "garman_klass_daily_pct": round(garman_klass, 5),
+        "rogers_satchell_daily_pct": round(rogers_satchell, 5),
+        "yang_zhang_daily_pct": round(yang_zhang, 5) if yang_zhang is not None else None,
+        "blended_daily_pct": round(blended, 5) if blended is not None else None,
+        "annualized_pct": round(blended * math.sqrt(252), 5) if blended is not None else None,
+        "score": round(score, 2),
+        "score_range": _score_meta(score, -1, 1),
+        "detail": "ATR、Parkinson、Garman-Klass、Yang-Zhang 等区间波动率的 20 日混合估计；用于判断点位间距是否需要放宽。",
+    }
+
+
+def _vix_volatility_context(symbol: str, snapshot: TechnicalSnapshot, bars: list[Bar], intraday_summary: dict | None = None) -> dict:
+    price = float(snapshot.price)
+    closes = [bar.close for bar in bars if bar.close > 0]
+    latest_window = closes[-252:] if closes else []
+    pct252 = _percentile_rank(latest_window, price)
+    z_window = closes[-126:] if len(closes) >= 20 else closes
+    mean126 = _mean(z_window)
+    std126 = _stddev(z_window)
+    zscore126 = (price - mean126) / std126 if mean126 is not None and std126 and std126 > 0 else None
+    roc5 = _pct_change_from_window(closes, price, 5)
+    sma20 = snapshot.sma20 or _last(simple_moving_average(closes, 20))
+    ma20_deviation = (price / sma20 - 1.0) if sma20 else None
+
+    contributions = []
+    score = 0.0
+    level_score, level_reason, detail = _vix_level_contribution(symbol, price)
+    score += level_score
+    contributions.append(
+        {
+            "name": "VIX绝对水平",
+            "score": round(level_score, 2),
+            "score_range": _score_meta(level_score, -4, 2),
+            "reason": level_reason,
+            "detail": detail,
+            "metric": round(price, 4),
+            "reference": ">=30 恐慌；25~30 偏高；22~25 中性；18~22 正常偏低；<=18 低波动。",
+        }
+    )
+
+    percentile_score = 0.0
+    if pct252 is not None:
+        if pct252 >= 90:
+            percentile_score = -2.0
+        elif pct252 >= 75:
+            percentile_score = -1.0
+        elif pct252 <= 10:
+            percentile_score = 1.5
+        elif pct252 <= 20:
+            percentile_score = 1.0
+    score += percentile_score
+    contributions.append(
+        {
+            "name": "252日分位",
+            "score": round(percentile_score, 2),
+            "score_range": _score_meta(percentile_score, -2, 1.5),
+            "reason": "vix_percentile",
+            "detail": f"当前 VIX 位于近252日约 {pct252:.1f}% 分位。" if pct252 is not None else "日线不足，无法计算252日分位。",
+            "metric": pct252,
+            "metric_range": {"min": 0, "max": 100, "unit": "%", "percentile": pct252} if pct252 is not None else None,
+            "reference": ">=90% 极端紧张；75~90% 偏高；10~20% 偏低；<=10% 极低波动。",
+        }
+    )
+
+    z_score_contribution = 0.0
+    if zscore126 is not None:
+        if zscore126 >= 2.0:
+            z_score_contribution = -1.5
+        elif zscore126 >= 1.0:
+            z_score_contribution = -0.7
+        elif zscore126 <= -2.0:
+            z_score_contribution = 0.8
+        elif zscore126 <= -1.0:
+            z_score_contribution = 0.5
+    score += z_score_contribution
+    contributions.append(
+        {
+            "name": "126日Z-score",
+            "score": round(z_score_contribution, 2),
+            "score_range": _score_meta(z_score_contribution, -1.5, 0.8),
+            "reason": "vix_zscore",
+            "detail": f"相对126日均值偏离 {zscore126:.2f} 个标准差。" if zscore126 is not None else "日线不足，无法计算Z-score。",
+            "metric": round(zscore126, 3) if zscore126 is not None else None,
+            "metric_range": _score_meta(zscore126, -3, 3) if zscore126 is not None else None,
+            "reference": ">=2σ 恐慌冲击；1~2σ 偏紧；<-1σ 波动压低。",
+        }
+    )
+
+    momentum_score = 0.0
+    if roc5 is not None:
+        if roc5 >= 0.20:
+            momentum_score = -1.2
+        elif roc5 >= 0.08:
+            momentum_score = -0.6
+        elif roc5 <= -0.15:
+            momentum_score = 0.8
+        elif roc5 <= -0.08:
+            momentum_score = 0.4
+    score += momentum_score
+    contributions.append(
+        {
+            "name": "5日波动率动量",
+            "score": round(momentum_score, 2),
+            "score_range": _score_meta(momentum_score, -1.2, 0.8),
+            "reason": "vix_5d_change",
+            "detail": f"VIX 5日变化 {roc5 * 100:.1f}%。" if roc5 is not None else "日线不足，无法计算5日变化。",
+            "metric": round(roc5, 5) if roc5 is not None else None,
+            "metric_range": _score_meta(roc5, -0.25, 0.25) if roc5 is not None else None,
+            "reference": "5日急升通常压制风险资产；5日回落代表压力释放。",
+        }
+    )
+
+    mean_reversion_score = 0.0
+    if ma20_deviation is not None:
+        if ma20_deviation >= 0.15:
+            mean_reversion_score = -0.9
+        elif ma20_deviation >= 0.06:
+            mean_reversion_score = -0.45
+        elif ma20_deviation <= -0.10:
+            mean_reversion_score = 0.45
+    score += mean_reversion_score
+    contributions.append(
+        {
+            "name": "相对20日均值",
+            "score": round(mean_reversion_score, 2),
+            "score_range": _score_meta(mean_reversion_score, -0.9, 0.45),
+            "reason": "vix_vs_sma20",
+            "detail": f"较20日均值偏离 {ma20_deviation * 100:.1f}%。" if ma20_deviation is not None else "缺少20日均值。",
+            "metric": round(ma20_deviation, 5) if ma20_deviation is not None else None,
+            "metric_range": _score_meta(ma20_deviation, -0.2, 0.2) if ma20_deviation is not None else None,
+            "reference": "显著高于20日均值说明恐慌升温；显著低于均值说明波动压制。",
+        }
+    )
+
+    intraday_score = 0.0
+    if intraday_summary:
+        intraday_score = max(-1.5, min(1.5, float(intraday_summary.get("score", 0)) * -0.35))
+        score += intraday_score
+        contributions.append(
+            {
+                "name": "日内反向趋势",
+                "score": round(intraday_score, 2),
+                "score_range": _score_meta(intraday_score, -1.5, 1.5),
+                "reason": f"intraday_inverse_{intraday_summary.get('label', 'mixed')}",
+                "detail": "VIX 日内走强代表风险偏好下降；VIX 日内走弱代表风险偏好改善。",
+                "reference": "分钟线原始分 -5~+5，乘以 -0.35 后封顶 ±1.5。",
+            }
+        )
+
+    score = max(-8.0, min(5.0, score))
+    return {
+        "symbol": symbol,
+        "role": "volatility_index" if _is_true_vix_index(symbol) else "volatility_proxy",
+        "price": round(price, 4),
+        "source": snapshot.source,
+        "quote_asof": snapshot.quote_asof,
+        "quote_age_minutes": None if snapshot.quote_age_minutes is None else round(snapshot.quote_age_minutes, 2),
+        "sma20": round(sma20, 4) if sma20 else None,
+        "percentile_252": pct252,
+        "zscore_126": round(zscore126, 3) if zscore126 is not None else None,
+        "change_5d_pct": round(roc5, 5) if roc5 is not None else None,
+        "ma20_deviation_pct": round(ma20_deviation, 5) if ma20_deviation is not None else None,
+        "score": round(score, 2),
+        "score_range": _score_meta(score, -8, 5),
+        "contributions": contributions,
+        "intraday": {
+            "label": intraday_summary.get("label"),
+            "score": intraday_summary.get("score"),
+            "score_range": intraday_summary.get("score_range"),
+            "regime_contribution": round(intraday_score, 2),
+            "from_open_pct": intraday_summary.get("from_open_pct"),
+            "from_vwap_pct": intraday_summary.get("from_vwap_pct"),
+            "last_30m_pct": intraday_summary.get("last_30m_pct"),
+            "range_position": intraday_summary.get("range_position"),
+        } if intraday_summary else None,
+        "usage": "VIX 使用绝对水平、历史分位、Z-score、5日动量和均值偏离，不使用股票式成交量/POC。",
+    }
+
+
+def classify_market_regime(
+    snapshots: dict[str, TechnicalSnapshot],
+    config: dict,
+    research: dict,
+    intraday: dict[str, dict] | None = None,
+    daily_bars_by_symbol: dict[str, list[Bar]] | None = None,
+) -> dict:
     score = 0.0
     reasons: list[str] = []
     components: list[dict] = []
     proxies = [symbol.upper() for symbol in config.get("market_proxies", [])]
     intraday = intraday or {}
+    daily_bars_by_symbol = daily_bars_by_symbol or {}
 
     for symbol in proxies:
         snap = snapshots.get(symbol)
@@ -344,51 +680,14 @@ def classify_market_regime(snapshots: dict[str, TechnicalSnapshot], config: dict
             "contributions": [],
         }
         if _is_volatility_proxy(symbol):
-            level_score, level_reason, detail = _vix_level_contribution(symbol, snap.price)
-            if not _is_true_vix_index(symbol):
-                detail = detail.replace("VIX", "VIX 代理")
-            score += level_score
-            component_score += level_score
-            reasons.append(f"{symbol}:{level_reason}")
-            component["contributions"].append(
-                {
-                    "name": "VIX绝对水平" if _is_true_vix_index(symbol) else "波动率代理水平",
-                    "score": round(level_score, 2),
-                    "score_range": _score_meta(level_score, -4, 2),
-                    "reason": level_reason,
-                    "detail": detail,
-                    "reference": ">=30 恐慌；25~30 偏高；22~25 中性；18~22 正常偏低；<=18 低波动。",
-                }
-            )
-            day = intraday.get(symbol)
-            if day:
-                intraday_score = max(-1.5, min(1.5, float(day.get("score", 0)) * -0.35))
-                if intraday_score:
-                    score += intraday_score
-                    component_score += intraday_score
-                    reasons.append(f"{symbol}:intraday_inverse_{day.get('label', 'mixed')}:{intraday_score:+.1f}")
-                component["intraday"] = {
-                    "label": day.get("label"),
-                    "score": day.get("score"),
-                    "score_range": day.get("score_range"),
-                    "regime_contribution": round(intraday_score, 2),
-                    "from_open_pct": day.get("from_open_pct"),
-                    "from_vwap_pct": day.get("from_vwap_pct"),
-                    "last_30m_pct": day.get("last_30m_pct"),
-                    "range_position": day.get("range_position"),
-                }
-                component["contributions"].append(
-                    {
-                        "name": "日内反向趋势",
-                        "score": round(intraday_score, 2),
-                        "score_range": _score_meta(intraday_score, -1.5, 1.5),
-                        "reason": f"intraday_inverse_{day.get('label', 'mixed')}",
-                        "detail": "VIX 日内走强代表风险偏好下降；VIX 日内走弱代表风险偏好改善。",
-                        "reference": "分钟线原始分 -5~+5，乘以 -0.35 后封顶 ±1.5。",
-                    }
-                )
-            component["score"] = round(component_score, 2)
-            component["score_range"] = _score_meta(component_score, -6, 4)
+            vol_context = _vix_volatility_context(symbol, snap, daily_bars_by_symbol.get(symbol, []), intraday.get(symbol))
+            component.update(vol_context)
+            component_score = float(vol_context.get("score") or 0.0)
+            score += component_score
+            for contribution in vol_context.get("contributions", []):
+                reason = contribution.get("reason")
+                if reason:
+                    reasons.append(f"{symbol}:{reason}:{float(contribution.get('score') or 0.0):+.1f}")
             components.append(component)
             continue
 
@@ -1231,8 +1530,16 @@ def _enrich_levels(levels: list[dict], price: float, bars: list[Bar]) -> list[di
     return enriched
 
 
-def _structure_offsets(side: str, snapshot: TechnicalSnapshot, regime: dict | None, market_structure: dict | None = None) -> tuple[float, float, str]:
+def _structure_offsets(
+    side: str,
+    snapshot: TechnicalSnapshot,
+    regime: dict | None,
+    market_structure: dict | None = None,
+    volatility_pct: float | None = None,
+) -> tuple[float, float, str]:
     atr_pct = (snapshot.atr14 / snapshot.price) if snapshot.atr14 and snapshot.price else 0.025
+    if volatility_pct and math.isfinite(volatility_pct):
+        atr_pct = max(0.008, min(0.20, 0.55 * atr_pct + 0.45 * float(volatility_pct)))
     label = str((regime or {}).get("label") or "neutral")
     market_score = float((market_structure or {}).get("score") or 0.0)
     if side == "buy":
@@ -1318,7 +1625,9 @@ def _limit_candidates(side: str, levels: list[dict], price: float, lower_bound: 
         item = _round_level(level)
         item["candidate_id"] = f"C{index}"
         item["candidate_price"] = _round_price(float(level["price"]))
-        item["candidate_score"] = round(candidate_score(level)[0], 2)
+        raw_candidate_score = candidate_score(level)[0]
+        item["candidate_score"] = round(raw_candidate_score, 2)
+        item["candidate_score_range"] = _score_meta(raw_candidate_score, -2, 9)
         item["within_offset_band"] = lower_bound <= float(level["price"]) <= upper_bound
         result.append(item)
     return result
@@ -1446,6 +1755,8 @@ def _price_volume_analysis(
 
     components: list[dict] = []
     score = 0.0
+    momentum_context = _risk_adjusted_momentum_context(daily_bars, price)
+    volatility_context = _range_volatility_context(daily_bars, price, snapshot.atr14)
 
     trend_score = 0.0
     if snapshot.trend_action == "buy":
@@ -1468,6 +1779,30 @@ def _price_volume_analysis(
             "score": round(trend_score, 2),
             "score_range": _score_meta(trend_score, -3.5, 3.5),
             "detail": "趋势信号、20/50日均线和趋势止损线。",
+        }
+    )
+
+    momentum_score = float(momentum_context.get("score") or 0.0)
+    score += momentum_score
+    components.append(
+        {
+            "name": "多周期动量",
+            "score": round(momentum_score, 2),
+            "score_range": momentum_context.get("score_range") or _score_meta(momentum_score, -2, 2),
+            "detail": momentum_context.get("detail", "20/60/120日风险调整动量。"),
+            "horizons": momentum_context.get("horizons", []),
+        }
+    )
+
+    volatility_score = float(volatility_context.get("score") or 0.0)
+    score += volatility_score
+    components.append(
+        {
+            "name": "区间波动率",
+            "score": round(volatility_score, 2),
+            "score_range": volatility_context.get("score_range") or _score_meta(volatility_score, -1, 1),
+            "detail": volatility_context.get("detail", "ATR 与区间波动率估计。"),
+            "metrics": volatility_context,
         }
     )
 
@@ -1645,6 +1980,8 @@ def _price_volume_analysis(
         "trend_stop": round(snapshot.trend_stop, 4) if snapshot.trend_stop else None,
         "volume_ratio20": round(volume_ratio20, 3) if volume_ratio20 is not None else None,
         "avg_volume20": round(avg_volume20, 2) if avg_volume20 is not None else None,
+        "risk_adjusted_momentum": momentum_context,
+        "range_volatility": volatility_context,
         "supports": supports,
         "resistances": resistances,
         "components": components,
@@ -1668,12 +2005,29 @@ def _price_volume_multiplier(analysis: dict | None) -> tuple[float, list[str]]:
 def _market_structure_context(analyses: dict[str, dict], regime: dict) -> dict:
     components = []
     for symbol in sorted(analyses):
+        if _is_true_vix_index(symbol):
+            continue
         raw_score = float(analyses[symbol].get("score") or 0.0)
         if _is_volatility_proxy(symbol):
             components.append({"symbol": symbol, "score": -raw_score, "raw_score": raw_score, "direction": "inverse_vol"})
         else:
             components.append({"symbol": symbol, "score": raw_score, "raw_score": raw_score, "direction": "risk"})
-    if components:
+    vol_components = [
+        item
+        for item in (regime.get("components") or [])
+        if _is_true_vix_index(str(item.get("symbol") or "")) and not item.get("missing")
+    ]
+    for item in vol_components:
+        raw_score = float(item.get("score") or 0.0)
+        compressed = max(-6.0, min(6.0, raw_score * 0.75))
+        components.append({"symbol": item.get("symbol"), "score": round(compressed, 2), "raw_score": raw_score, "direction": "volatility_risk"})
+    risk_components = [item for item in components if item.get("direction") != "volatility_risk"]
+    volatility_components = [item for item in components if item.get("direction") == "volatility_risk"]
+    if risk_components and volatility_components:
+        risk_score = sum(item["score"] for item in risk_components) / len(risk_components)
+        vol_score = sum(item["score"] for item in volatility_components) / len(volatility_components)
+        score = risk_score * 0.75 + vol_score * 0.25
+    elif components:
         score = sum(item["score"] for item in components) / len(components)
     else:
         score = float(regime.get("score") or 0.0) * 0.4
@@ -1693,7 +2047,7 @@ def _market_structure_context(analyses: dict[str, dict], regime: dict) -> dict:
         "score": score,
         "score_range": _score_meta(score, -6, 6),
         "components": components,
-        "usage": "SPY/SMH/SOXX 量价分与 ^VIX 反向量价分，用于调节买入折价和卖出溢价。",
+        "usage": "SPY/SMH/SOXX 用量价分，^VIX 用专属波动率风险分；合成后用于调节买入折价和卖出溢价。",
     }
 
 
@@ -1708,11 +2062,19 @@ def _limit_price(
     market_structure: dict | None = None,
 ) -> tuple[float, dict]:
     atr_pct = (snapshot.atr14 / snapshot.price) if snapshot.atr14 and snapshot.price else 0.02
-    min_offset, max_offset, offset_policy = _structure_offsets(side, snapshot, regime, market_structure)
     price = snapshot.price
 
     daily_bars = daily_bars or []
     intraday_bars = intraday_bars or []
+    volatility_context = _range_volatility_context(daily_bars, price, snapshot.atr14)
+    volatility_pct = volatility_context.get("blended_daily_pct")
+    min_offset, max_offset, offset_policy = _structure_offsets(
+        side,
+        snapshot,
+        regime,
+        market_structure,
+        float(volatility_pct) if volatility_pct is not None else None,
+    )
     levels = _enrich_levels(_dedupe_levels(_limit_levels(side, snapshot, daily_bars, intraday_summary, intraday_bars), price), price, daily_bars)
     selected_source = offset_policy
     selected_raw = price * (1 - min_offset if side == "buy" else 1 + min_offset)
@@ -1775,6 +2137,7 @@ def _limit_price(
         "max_price": round(upper_bound, 4),
         "atr14": round(snapshot.atr14, 4) if snapshot.atr14 else None,
         "atr_pct": round(atr_pct, 5),
+        "range_volatility": volatility_context,
         "offset_pct_range": [round(min_offset, 4), round(max_offset, 4)],
         "offset_policy": offset_policy,
         "regime_label": (regime or {}).get("label"),
@@ -1922,11 +2285,17 @@ def build_trade_plan(
             (intraday_bars or {}).get(symbol, []),
         )
         for symbol, snapshot in snapshots.items()
+        if not _is_true_vix_index(symbol)
     }
 
-    regime = classify_market_regime(snapshots, config, research, intraday_summaries)
+    regime = classify_market_regime(snapshots, config, research, intraday_summaries, daily_bars_by_symbol)
     technical_analysis = {symbol: all_technical_analysis[symbol] for symbol in sorted(symbols) if symbol in all_technical_analysis}
     market_technical_analysis = {symbol: all_technical_analysis[symbol] for symbol in sorted(proxies) if symbol in all_technical_analysis}
+    volatility_analysis = {
+        str(item.get("symbol")): item
+        for item in regime.get("components", [])
+        if item.get("role") in {"volatility_index", "volatility_proxy"} and not item.get("missing")
+    }
     market_structure = _market_structure_context(market_technical_analysis, regime)
     risk = config["risk"]
     market_session = _current_market_snapshot_label(datetime.now(timezone.utc).isoformat())
@@ -2310,5 +2679,6 @@ def build_trade_plan(
         "intraday": intraday_summaries,
         "technical_analysis": {symbol: technical_analysis[symbol] for symbol in sorted(technical_analysis)},
         "market_technical_analysis": {symbol: market_technical_analysis[symbol] for symbol in sorted(market_technical_analysis)},
+        "volatility_analysis": {symbol: volatility_analysis[symbol] for symbol in sorted(volatility_analysis)},
         "market_structure": market_structure,
     }

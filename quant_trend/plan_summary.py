@@ -147,6 +147,13 @@ def _compact_plan(plan: dict) -> dict:
             }
             for symbol, item in market_technical.items()
         },
+        "volatility_analysis": {
+            symbol: {
+                **item,
+                "score_text": _score_text(item.get("score"), item.get("score_range"), -8, 5),
+            }
+            for symbol, item in (plan.get("volatility_analysis") or {}).items()
+        },
         "scorecard": plan.get("research_process", {}).get("scorecard", {}),
         "llm_limit_decisions": plan.get("llm_limit_decisions", {}),
         "orders": plan.get("orders", []),
@@ -364,7 +371,8 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None, f
         "必须基于输入数据，每只股票一段话；必须覆盖输入positions里的全部symbol。"
         "开头必须先写一段整体市场框架，明确覆盖 SPY、SMH、SOXX、^VIX；缺数据就写缺数据。"
         "每段可以较完整，但要分段清楚；不要因为篇幅省略任何持仓股票。"
-        "优先解释近期量价技术面：支撑、压力、Volume Profile、POC/VAH/VAL/HVN/LVN、筹码占比、VWAP、高量区、20日量比、日内趋势。"
+        "优先解释近期量价技术面：支撑、压力、Volume Profile、POC/VAH/VAL/HVN/LVN、筹码占比、VWAP、高量区、20日量比、日内趋势、多周期风险调整动量和区间波动率。"
+        "^VIX 必须按 volatility_analysis 里的绝对水平、252日分位、126日Z-score、5日变化和20日均值偏离解释，不要写股票式成交量/POC。"
         "如存在 llm_limit_decisions 或 order.llm_limit_decision，要说明模型选择的候选点位依据。"
         "如存在 order.llm_reference_ladder，只需简短提及有2-3档参考价梯；强调它是参考分层，不是自动下单。"
         "凡写到量价分、日内分、趋势分、市场分或任何评分，必须优先复制输入里的 *_score_text；"

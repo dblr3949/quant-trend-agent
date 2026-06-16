@@ -39,6 +39,9 @@ def _compact_level(level: dict) -> dict:
         "touch_count": level.get("touch_count"),
         "recency_days": level.get("recency_days"),
         "level_strength_score": level.get("level_strength_score"),
+        "level_strength_range": level.get("level_strength_range"),
+        "candidate_score": level.get("candidate_score"),
+        "candidate_score_range": level.get("candidate_score_range"),
         "within_offset_band": level.get("within_offset_band"),
     }
 
@@ -64,10 +67,30 @@ def _compact_technical(item: dict | None) -> dict:
         "label": item.get("label"),
         "range_position": item.get("range_position"),
         "volume_ratio20": item.get("volume_ratio20"),
+        "risk_adjusted_momentum": item.get("risk_adjusted_momentum"),
+        "range_volatility": item.get("range_volatility"),
         "supports": [_compact_level(level) for level in (item.get("supports") or [])[:5]],
         "resistances": [_compact_level(level) for level in (item.get("resistances") or [])[:5]],
         "components": item.get("components", []),
         "explanation": item.get("explanation"),
+    }
+
+
+def _compact_volatility(item: dict | None) -> dict:
+    if not item:
+        return {}
+    return {
+        "symbol": item.get("symbol"),
+        "role": item.get("role"),
+        "price": item.get("price"),
+        "score": item.get("score"),
+        "score_range": item.get("score_range"),
+        "percentile_252": item.get("percentile_252"),
+        "zscore_126": item.get("zscore_126"),
+        "change_5d_pct": item.get("change_5d_pct"),
+        "ma20_deviation_pct": item.get("ma20_deviation_pct"),
+        "usage": item.get("usage"),
+        "contributions": item.get("contributions", []),
     }
 
 
@@ -140,6 +163,10 @@ def _compact_plan(plan: dict) -> dict:
         "market_technical_analysis": {
             symbol: _compact_technical(item)
             for symbol, item in sorted(market_technical.items())
+        },
+        "volatility_analysis": {
+            symbol: _compact_volatility(item)
+            for symbol, item in sorted((plan.get("volatility_analysis") or {}).items())
         },
         "orders": orders,
         "trade_groups": [
@@ -284,7 +311,7 @@ def _call_openai_decisions(compact: dict, model: str | None = None) -> dict | No
         "每张单的主执行 candidate_id 只能从 candidate_levels 里选择；若 candidate_levels 为空，candidate_id 返回 null。"
         "另外你必须为每张单输出 2到3 档 reference_ladder，作为用户参考价梯；价梯价格可由你自行决定，不必等于候选价，"
         "但必须在输入的 ladder_price_bounds 内，且买入价低于现价、卖出价高于现价。"
-        "必须同时考虑个股量价、筹码/成交占比、支撑压力力度、SPY/SMH/SOXX/^VIX、杠杆和保证金。"
+        "必须同时考虑个股量价、筹码/成交占比、支撑压力力度、多周期风险调整动量、区间波动率、SPY/SMH/SOXX 趋势、^VIX 历史分位/Z-score/5日变化、杠杆和保证金。"
         "必须读取用户本轮 prompt、prompt_overlay 和 decision_context；明确禁止/绝对类约束不可违反，普通偏好可被强证据反驳但要说明。"
         "如果订单属于 range_trade/做T，同一标的的买腿和卖腿不必机械相等；"
         "flat_preferred 表示用户偏好净仓位接近不变，但你可以根据指标与prompt决定净加仓、净减仓或净持平；"

@@ -767,13 +767,13 @@ function renderResearchFlow(process) {
     {
       title: "3. 量价结构主锚",
       status: processStatusBadge("主研究项", "ok"),
-      body: "先找近期支撑/压力，再按成交分布和结构强度排序。买点偏向历史支撑下沿，卖点偏向历史压力/价值区上沿，日内指标只做辅助。",
+      body: "先找近期支撑/压力，再按成交分布、结构强度、多周期动量和区间波动率排序。买点偏向历史支撑下沿，卖点偏向历史压力/价值区上沿，日内指标只做辅助。",
       metrics: [
         scoreMetric(scorecard, "price_volume", "近期量价点位"),
         scoreMetric(scorecard, "technical", "趋势/均线"),
         scoreMetric(scorecard, "intraday", "当日分钟线"),
       ],
-      method: "口径：5/10/20/60/90/126日结构、Volume Profile 的 POC/VAH/VAL/HVN/LVN、筹码占比、成交占比、共振、触碰次数、距现价、20日量比、VWAP/近30分钟。",
+      method: "口径：5/10/20/60/90/126日结构、Volume Profile 的 POC/VAH/VAL/HVN/LVN、筹码占比、成交占比、共振、触碰次数、20/60/120日风险调整动量、ATR/Parkinson/Garman-Klass/Yang-Zhang 区间波动率、20日量比、VWAP/近30分钟。",
     },
     {
       title: "4. 仓位与杠杆预算",
@@ -1173,6 +1173,39 @@ function renderMiniTechChart(item) {
   `;
 }
 
+function renderComponentExtra(component) {
+  const horizons = component?.horizons || [];
+  if (horizons.length) {
+    return `
+      <div class="component-extra">
+        ${horizons
+          .map(
+            (item) =>
+              `<span title="${escapeHtml(item.reference || "")}">${escapeHtml(item.window)}日：收益${fmtPct(item.return_pct)} · 波动${fmtPct(item.period_volatility_pct)} · 风调${escapeHtml(item.risk_adjusted_return ?? "-")}</span>`,
+          )
+          .join("")}
+      </div>
+    `;
+  }
+  const metrics = component?.metrics || {};
+  if (metrics.blended_daily_pct !== undefined || metrics.annualized_pct !== undefined) {
+    const items = [
+      ["混合日波动", metrics.blended_daily_pct],
+      ["ATR", metrics.atr_pct],
+      ["Parkinson", metrics.parkinson_daily_pct],
+      ["Garman-Klass", metrics.garman_klass_daily_pct],
+      ["Yang-Zhang", metrics.yang_zhang_daily_pct],
+      ["年化估计", metrics.annualized_pct],
+    ].filter(([, value]) => value !== null && value !== undefined);
+    return `
+      <div class="component-extra">
+        ${items.map(([label, value]) => `<span title="${escapeHtml(metrics.detail || "")}">${escapeHtml(label)} ${fmtPct(value)}</span>`).join("")}
+      </div>
+    `;
+  }
+  return "";
+}
+
 function renderTechnicalAnalysis(analysis) {
   const target = $("technicalAnalysis");
   const entries = Object.values(analysis || {}).sort((a, b) => String(a.symbol).localeCompare(String(b.symbol)));
@@ -1188,7 +1221,7 @@ function renderTechnicalAnalysis(analysis) {
           const components = (item.components || [])
             .map(
               (component) =>
-                `<li><strong>${escapeHtml(component.name)}</strong><span>${escapeHtml(formatScore(component.score, component.score_range, component.name))} · ${escapeHtml(component.detail || "")}</span></li>`,
+                `<li><strong>${escapeHtml(component.name)}</strong><span>${escapeHtml(formatScore(component.score, component.score_range, component.name))} · ${escapeHtml(component.detail || "")}</span>${renderComponentExtra(component)}</li>`,
             )
             .join("");
           return `
@@ -1326,7 +1359,7 @@ function renderTechModal(symbol) {
   const components = (item.components || [])
     .map(
       (component) =>
-        `<li><strong>${escapeHtml(component.name)}</strong><span>${escapeHtml(formatScore(component.score, component.score_range, component.name))} · ${escapeHtml(component.detail || "")}</span></li>`,
+        `<li><strong>${escapeHtml(component.name)}</strong><span>${escapeHtml(formatScore(component.score, component.score_range, component.name))} · ${escapeHtml(component.detail || "")}</span>${renderComponentExtra(component)}</li>`,
     )
     .join("");
   $("techModalBody").innerHTML = `
@@ -1798,6 +1831,7 @@ function renderTradeGroups(groups, plan) {
 
 function marketRoleLabel(role) {
   if (role === "volatility_index") return "波动率指数";
+  if (role === "volatility_proxy") return "波动率代理";
   if (role === "risk_asset") return "风险资产";
   if (role === "missing") return "缺数据";
   return role || "-";
@@ -1853,9 +1887,29 @@ function renderMarketIntraday(component) {
   `;
 }
 
+function renderMarketSpecialMetrics(component) {
+  if (component?.role !== "volatility_index" && component?.role !== "volatility_proxy") return "";
+  const chips = [];
+  if (component.percentile_252 !== null && component.percentile_252 !== undefined) {
+    chips.push(`<span title="当前 VIX 在近252个交易日收盘分布中的位置。">252日分位 <b>${Number(component.percentile_252).toFixed(1)}%</b></span>`);
+  }
+  if (component.zscore_126 !== null && component.zscore_126 !== undefined) {
+    chips.push(`<span title="当前 VIX 相对近126日均值偏离多少个标准差。">126日Z <b>${Number(component.zscore_126).toFixed(2)}</b></span>`);
+  }
+  if (component.change_5d_pct !== null && component.change_5d_pct !== undefined) {
+    chips.push(`<span title="当前 VIX 相对5个交易日前的变化。">5日变化 <b>${fmtPct(component.change_5d_pct)}</b></span>`);
+  }
+  if (component.ma20_deviation_pct !== null && component.ma20_deviation_pct !== undefined) {
+    chips.push(`<span title="当前 VIX 相对20日均线的偏离。">20日偏离 <b>${fmtPct(component.ma20_deviation_pct)}</b></span>`);
+  }
+  if (!chips.length) return "";
+  return `<div class="market-special-metrics">${chips.join("")}</div>`;
+}
+
 function fallbackMarketComponents(plan) {
   const analyses = plan?.market_technical_analysis || {};
-  return Object.entries(analyses)
+  const volatility = plan?.volatility_analysis || {};
+  const riskItems = Object.entries(analyses)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([symbol, item]) => ({
       symbol,
@@ -1873,6 +1927,10 @@ function fallbackMarketComponents(plan) {
         },
       ],
     }));
+  const volItems = Object.entries(volatility)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([symbol, item]) => ({ ...item, symbol, role: item.role || "volatility_index" }));
+  return [...riskItems, ...volItems];
 }
 
 function renderMarketRegime(plan) {
@@ -1896,7 +1954,7 @@ function renderMarketRegime(plan) {
         <strong>${fmtLeverage(plan.regime?.target_gross_exposure)}</strong>
       </div>
       <div>
-        <span>指数量价结构</span>
+        <span>指数/波动结构</span>
         <strong>${escapeHtml(structureText)}</strong>
       </div>
     </div>
@@ -1906,7 +1964,7 @@ function renderMarketRegime(plan) {
           const tone = marketDirectionClass(component);
           const maText =
             component.role === "volatility_index"
-              ? "阈值：>=30 恐慌，25~30 偏高，22~25 中性，18~22 正常偏低，<=18 低波动"
+              ? "VIX专属口径：绝对水平、252日分位、126日Z-score、5日变化、20日均值偏离；不使用股票式成交量/POC。"
               : `MA20 ${fmtPrice(component.sma20)} · MA50 ${fmtPrice(component.sma50)}`;
           return `
             <article class="market-proxy-card ${tone}">
@@ -1922,6 +1980,7 @@ function renderMarketRegime(plan) {
                 <small title="${escapeHtml(marketSourceText(component))}">${escapeHtml(component.source || "-")}</small>
               </div>
               <p>${escapeHtml(maText)}</p>
+              ${renderMarketSpecialMetrics(component)}
               ${renderMarketIntraday(component)}
               <ul class="market-contribution-list">${renderMarketContributionList(component)}</ul>
             </article>
@@ -1929,7 +1988,7 @@ function renderMarketRegime(plan) {
         })
         .join("")}
     </div>
-    <p class="market-regime-note">市况分用于决定 risk_on / neutral / risk_off 和目标总杠杆；指数量价结构分单独用于调节买入折价、卖出溢价。</p>
+    <p class="market-regime-note">市况分用于决定 risk_on / neutral / risk_off 和目标总杠杆；指数/波动结构分单独用于调节买入折价、卖出溢价。</p>
   `;
 }
 

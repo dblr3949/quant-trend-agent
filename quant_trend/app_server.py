@@ -657,7 +657,7 @@ class AgentApp:
                 "score": market_score,
                 "score_range": plan.get("regime", {}).get("score_range") or _score_meta(market_score, -10, 10),
                 "verdict": plan.get("regime", {}).get("label", "unknown"),
-                "detail": "SPY/SMH/SOXX 日线与当日趋势，加 ^VIX 真实波动率指数反向合成。",
+                "detail": "SPY/SMH/SOXX 日线与当日趋势，加 ^VIX 真实波动率指数的绝对值、历史分位、Z-score、5日变化和均值偏离合成。",
                 "reference": ">=4 风险偏多；-2 到 4 中性；<=-2 风险收缩。",
             },
             "technical": {
@@ -734,7 +734,7 @@ class AgentApp:
                 "name": "近期量价技术面",
                 "weight": "主",
                 "status": "已纳入订单定价和目标权重微调",
-                "detail": "支撑/压力、Volume Profile、筹码占比、VWAP、高量成交区、量比和日内趋势会进入 LLM 摘要与前端点位图。",
+                "detail": "支撑/压力、Volume Profile、筹码占比、VWAP、高量成交区、量比、多周期风险调整动量、区间波动率和日内趋势会进入 LLM 摘要与前端点位图。",
             },
             {
                 "name": "仓位/杠杆/维持保证金",
@@ -833,7 +833,7 @@ class AgentApp:
                 avg_price_volume = scorecard.get("price_volume", {}).get("score", 0)
                 self._progress_step(
                     "量价结构完成",
-                    f"生成 {price_volume_count} 个标的的近端支撑/压力、量比、高量区和点位解释。",
+                    f"生成 {price_volume_count} 个标的的支撑/压力、Volume Profile、多周期动量、区间波动率和点位解释。",
                     {"标的数": price_volume_count, "平均量价分": {"score": avg_price_volume, "score_range": _score_meta(avg_price_volume, -6, 6)}},
                 )
                 self._progress_step("评分汇总", "生成量价点位、市场、趋势、日内、prompt、杠杆风险评分。", scorecard)
@@ -861,7 +861,7 @@ class AgentApp:
                     "sources": self._research_sources(provider, settings, prompt, len(intraday_bars)),
                     "decision_factors": plan["decision_context"],
                 }
-                self._progress_step("LLM 点位复核", "把候选支撑/压力、筹码占比、指数趋势和风控输入 LLM；只允许从候选价中选择。", {"状态": "开始"})
+                self._progress_step("LLM 点位复核", "把候选支撑/压力、筹码占比、多周期动量、区间波动率、指数趋势、VIX波动率风险和风控输入 LLM；主点位只允许从候选价中选择。", {"状态": "开始"})
                 llm_limit_decisions = apply_llm_limit_decisions(plan, model=llm_model)
                 if llm_limit_decisions:
                     plan["llm_limit_decisions"] = llm_limit_decisions
