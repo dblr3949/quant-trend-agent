@@ -19,6 +19,7 @@ from .market_data import (
     IBKRDataClient,
     IntradayBar,
     MassiveDataClient,
+    _is_vix_index_symbol,
     fetch_yahoo_chart_daily_rows,
     fetch_yahoo_chart_intraday_rows,
     fetch_yahoo_chart_quotes,
@@ -64,6 +65,17 @@ DEFAULT_SETTINGS = {
         {"label": "postmarket", "time": "05:10"},
     ],
 }
+
+
+def _bar_size_to_yahoo_interval(bar_size: str) -> str:
+    normalized = str(bar_size or "").strip().lower()
+    if normalized.startswith("1 "):
+        return "1m"
+    if normalized.startswith("15 "):
+        return "15m"
+    if normalized.startswith("30 "):
+        return "30m"
+    return "5m"
 
 
 def _storage_root(root: Path) -> Path:
@@ -347,6 +359,7 @@ class AgentApp:
         expected_latest = expected_latest or _latest_expected_us_daily_date()
         settings = settings or {}
         massive_client = None
+        massive_daily_start = (datetime.now(timezone.utc).date() - timedelta(days=720)).isoformat()
         if provider == "massive":
             try:
                 massive_client = MassiveDataClient(
@@ -361,7 +374,10 @@ class AgentApp:
             if local_last is not None and local_last >= expected_latest:
                 continue
             try:
-                rows = massive_client.fetch_daily_bars(symbol, "2023-01-01") if massive_client else fetch_yahoo_chart_daily_rows(symbol)
+                rows = massive_client.fetch_daily_bars(symbol, massive_daily_start) if massive_client else fetch_yahoo_chart_daily_rows(symbol)
+                if not rows and massive_client and _is_vix_index_symbol(symbol):
+                    rows = fetch_yahoo_chart_daily_rows(symbol)
+                    warnings.append(f"{symbol}: Massive 指数日线为空，已用 Yahoo Chart 兜底。")
                 if rows:
                     write_daily_rows(path, rows)
                     fetched_last = _last_csv_date(path)
@@ -371,6 +387,17 @@ class AgentApp:
                     source_name = "Massive/Polygon" if massive_client else "Yahoo Chart"
                     warnings.append(f"{symbol}: {source_name} daily history returned no rows")
             except Exception as exc:
+                if massive_client and _is_vix_index_symbol(symbol):
+                    try:
+                        rows = fetch_yahoo_chart_daily_rows(symbol)
+                        if rows:
+                            write_daily_rows(path, rows)
+                            warnings.append(f"{symbol}: Massive 指数日线失败，已用 Yahoo Chart 兜底: {exc}")
+                            continue
+                    except Exception as fallback_exc:
+                        stale = f"，本地只到 {local_last.isoformat()}" if local_last else ""
+                        warnings.append(f"{symbol}: VIX 指数日线 Massive/Yahoo 均失败{stale}: {exc}; fallback: {fallback_exc}")
+                        continue
                 stale = f"，本地只到 {local_last.isoformat()}" if local_last else ""
                 warnings.append(f"{symbol}: history refresh failed{stale}: {exc}")
         return warnings
@@ -385,6 +412,12 @@ class AgentApp:
                 timeout=float(settings.get("massive_timeout") or 10.0),
             )
             quotes = client.fetch_latest_quotes(symbols)
+            missing_vix = [symbol for symbol in symbols if _is_vix_index_symbol(symbol) and symbol.upper() not in quotes]
+            if missing_vix:
+                try:
+                    quotes.update(fetch_yahoo_chart_quotes(missing_vix))
+                except Exception as exc:
+                    client.last_symbol_errors.setdefault("^VIX", []).append(f"Yahoo VIX fallback failed: {exc}")
             if not quotes:
                 details = []
                 details.extend(client.last_messages)
@@ -455,7 +488,20 @@ class AgentApp:
                 timeout=float(settings.get("massive_timeout") or 10.0),
             )
             bars = client.fetch_intraday_bars(symbols, duration=duration, bar_size=bar_size)
+            missing_vix = [symbol for symbol in symbols if _is_vix_index_symbol(symbol) and symbol.upper() not in bars]
+            if missing_vix:
+                interval = _bar_size_to_yahoo_interval(bar_size)
+                for symbol in missing_vix:
+                    try:
+                        rows = fetch_yahoo_chart_intraday_rows(symbol, range_value="1d", interval=interval)
+                        if rows:
+                            bars[symbol.upper()] = rows
+                            warnings.append(f"{symbol}: Massive 指数分钟线缺失，已用 Yahoo Chart {interval} 兜底。")
+                    except Exception as exc:
+                        warnings.append(f"{symbol}: Yahoo VIX 分钟线兜底失败: {exc}")
             for symbol, errors in sorted(client.last_symbol_errors.items()):
+                if _is_vix_index_symbol(symbol) and symbol.upper() in bars:
+                    continue
                 warnings.append(f"{symbol}: Massive 分钟线错误: {'; '.join(errors)}")
             missing = sorted(set(symbols) - set(bars))
             if missing:
@@ -611,7 +657,7 @@ class AgentApp:
                 "score": market_score,
                 "score_range": plan.get("regime", {}).get("score_range") or _score_meta(market_score, -10, 10),
                 "verdict": plan.get("regime", {}).get("label", "unknown"),
-                "detail": "SPY/SMH/SOXX/VIXY 日线与当日趋势合成。",
+                "detail": "SPY/SMH/SOXX 日线与当日趋势，加 ^VIX 真实波动率指数反向合成。",
                 "reference": ">=4 风险偏多；-2 到 4 中性；<=-2 风险收缩。",
             },
             "technical": {
@@ -669,7 +715,7 @@ class AgentApp:
         if provider == "ibkr":
             sources.append({"name": "IBKR 安全边界", "type": "guardrail", "usage": "只调用行情接口，不读账户、持仓、订单、成交，不下单。"})
         if provider == "massive":
-            sources.append({"name": "Massive 套餐边界", "type": "guardrail", "usage": "REST 按单标的查询；不做全市场 snapshot、Flat Files 或批量全量请求。"})
+            sources.append({"name": "Massive 套餐边界", "type": "guardrail", "usage": "REST 按单标的查询；不做全市场 snapshot、Flat Files 或批量全量请求；^VIX 会优先映射 I:VIX，指数权限不可用时只对 ^VIX 用 Yahoo Chart 兜底。"})
         if os.getenv("OPENAI_API_KEY"):
             sources.append({"name": "OpenAI 候选点位复核", "type": "llm_candidate_selector", "usage": "只在后端生成的候选支撑/压力价中选择，不允许 LLM 编造新价格。"})
         return sources

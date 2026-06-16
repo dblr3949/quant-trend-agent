@@ -13,7 +13,7 @@ const thesisLabels = { intact: "逻辑未破", watch: "观察", broken: "逻辑�
 const intradayLabels = { strong_up: "强势上行", up: "上行", mixed: "震荡", down: "下行", strong_down: "强势下行" };
 const priceVolumeLabels = { strong: "量价共振强", positive: "量价偏强", mixed: "量价震荡", negative: "量价偏弱", weak: "量价转弱" };
 const bucketLabels = { auto: "自动", core: "核心", satellite: "卫星", watch: "观察", trim: "清理" };
-const marketProxySymbols = new Set(["SPY", "SMH", "SOXX", "VIXY"]);
+const marketProxySymbols = new Set(["SPY", "SMH", "SOXX", "^VIX", "VIXY"]);
 const constraintLabels = {
   flexible: "灵活",
   prefer_hold: "尽量不动",
@@ -166,8 +166,8 @@ function parseSummaryBlocks(text) {
       pendingTitle = null;
       continue;
     }
-    const symbolLine = line.match(/^([A-Z][A-Z0-9.]{0,6})[：:]\s*(.*)$/);
-    const compactSymbolLine = line.match(/^([A-Z][A-Z0-9.]{0,6})(?=现价|当前价|价格|：|:)/);
+    const symbolLine = line.match(/^(\^?[A-Z][A-Z0-9.]{0,6})[：:]\s*(.*)$/);
+    const compactSymbolLine = line.match(/^(\^?[A-Z][A-Z0-9.]{0,6})(?=现价|当前价|价格|：|:)/);
     const sectionLine = line.match(/^(市场指数分析|指数分析|持仓股票分析|持仓分析)[：:]\s*(.*)$/);
     if (pendingTitle) {
       blocks.push({ title: pendingTitle, body: line });
@@ -762,7 +762,7 @@ function renderResearchFlow(process) {
         processMetric("历史日线", sourceStatus(sources, "historical_daily", "已检查", "缺失")),
         processMetric("当日分钟线", hasIntraday ? "已接入" : "本轮缺失", "Massive 为默认；IBKR/Yahoo 作为可选兜底，异常会在 warning 里显示。"),
       ],
-      method: "Massive/Polygon 按单标的拉取快照、日线和分钟线；IBKR 只调用 market data；Yahoo Chart 只作流程兜底。",
+      method: "Massive/Polygon 按单标的拉取快照、日线和分钟线；^VIX 优先映射 I:VIX，指数权限不可用时只对 ^VIX 用 Yahoo Chart 兜底；IBKR 只调用 market data。",
     },
     {
       title: "3. 量价结构主锚",
@@ -1796,6 +1796,143 @@ function renderTradeGroups(groups, plan) {
   `;
 }
 
+function marketRoleLabel(role) {
+  if (role === "volatility_index") return "波动率指数";
+  if (role === "risk_asset") return "风险资产";
+  if (role === "missing") return "缺数据";
+  return role || "-";
+}
+
+function marketDirectionClass(component) {
+  const score = Number(component?.score || 0);
+  if (component?.role === "volatility_index") {
+    if (score > 0.4) return "risk-on";
+    if (score < -0.4) return "risk-off";
+    return "neutral";
+  }
+  if (score > 0.4) return "risk-on";
+  if (score < -0.4) return "risk-off";
+  return "neutral";
+}
+
+function marketSourceText(component) {
+  const source = component?.source || "-";
+  const asof = component?.quote_asof ? formatEtTimestamp(component.quote_asof, true) : "";
+  const age = component?.quote_age_minutes === null || component?.quote_age_minutes === undefined ? "" : ` · ${Number(component.quote_age_minutes).toFixed(1)}分钟`;
+  return `${source}${asof ? ` · ${asof}` : ""}${age}`;
+}
+
+function renderMarketContributionList(component) {
+  const contributions = component?.contributions || [];
+  if (!contributions.length) return `<li class="muted">暂无拆解</li>`;
+  return contributions
+    .map(
+      (item) => `
+        <li title="${escapeHtml(item.reference || item.detail || "")}">
+          <strong>${escapeHtml(item.name || "-")}</strong>
+          <span>${escapeHtml(formatScore(item.score, item.score_range, item.name))}</span>
+          <small>${escapeHtml(item.detail || item.reason || "")}</small>
+        </li>
+      `,
+    )
+    .join("");
+}
+
+function renderMarketIntraday(component) {
+  const item = component?.intraday;
+  if (!item) return `<div class="market-intraday muted">本轮无分钟线</div>`;
+  return `
+    <div class="market-intraday">
+      <span>${escapeHtml(intradayLabels[item.label] || item.label || "-")} · 原始 ${escapeHtml(formatScore(item.score, item.score_range, "intraday"))}</span>
+      <span>入市况 ${escapeHtml(formatScore(item.regime_contribution, { min: -1.5, max: 1.5 }, "日内贡献"))}</span>
+      <span>开盘 ${fmtPct(item.from_open_pct)}</span>
+      <span>VWAP ${fmtPct(item.from_vwap_pct)}</span>
+      <span>30分钟 ${fmtPct(item.last_30m_pct)}</span>
+      <span>区间 ${fmtPct(item.range_position)}</span>
+    </div>
+  `;
+}
+
+function fallbackMarketComponents(plan) {
+  const analyses = plan?.market_technical_analysis || {};
+  return Object.entries(analyses)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([symbol, item]) => ({
+      symbol,
+      role: String(symbol).includes("VIX") ? "volatility_index" : "risk_asset",
+      price: item.price,
+      source: "历史报告量价结构",
+      score: item.score,
+      score_range: item.score_range,
+      contributions: [
+        {
+          name: "量价结构",
+          score: item.score,
+          score_range: item.score_range,
+          detail: "旧报告没有保存 risk 贡献拆解，这里展示市场代理的量价结构分。",
+        },
+      ],
+    }));
+}
+
+function renderMarketRegime(plan) {
+  const target = $("marketRegimeBreakdown");
+  if (!target) return;
+  if (!plan) {
+    target.innerHTML = `<div class="muted">暂无指数技术面</div>`;
+    return;
+  }
+  const components = (plan.regime?.components || []).length ? plan.regime.components : fallbackMarketComponents(plan);
+  const structure = plan.market_structure || {};
+  const structureText = structure.score === undefined ? "-" : formatScore(structure.score, structure.score_range, "price_volume");
+  target.innerHTML = `
+    <div class="market-regime-head">
+      <div>
+        <span>市场状态</span>
+        <strong>${escapeHtml(labelRegime(plan.regime?.label))} · ${escapeHtml(formatScore(plan.regime?.score, plan.regime?.score_range, "regime"))}</strong>
+      </div>
+      <div>
+        <span>目标总杠杆</span>
+        <strong>${fmtLeverage(plan.regime?.target_gross_exposure)}</strong>
+      </div>
+      <div>
+        <span>指数量价结构</span>
+        <strong>${escapeHtml(structureText)}</strong>
+      </div>
+    </div>
+    <div class="market-proxy-grid">
+      ${components
+        .map((component) => {
+          const tone = marketDirectionClass(component);
+          const maText =
+            component.role === "volatility_index"
+              ? "阈值：>=30 恐慌，25~30 偏高，22~25 中性，18~22 正常偏低，<=18 低波动"
+              : `MA20 ${fmtPrice(component.sma20)} · MA50 ${fmtPrice(component.sma50)}`;
+          return `
+            <article class="market-proxy-card ${tone}">
+              <div class="market-proxy-title">
+                <div>
+                  <strong>${escapeHtml(component.symbol || "-")}</strong>
+                  <span>${escapeHtml(marketRoleLabel(component.role))}</span>
+                </div>
+                <em>${escapeHtml(formatScore(component.score, component.score_range, "market"))}</em>
+              </div>
+              <div class="market-proxy-price">
+                <b>${fmtPrice(component.price)}</b>
+                <small title="${escapeHtml(marketSourceText(component))}">${escapeHtml(component.source || "-")}</small>
+              </div>
+              <p>${escapeHtml(maText)}</p>
+              ${renderMarketIntraday(component)}
+              <ul class="market-contribution-list">${renderMarketContributionList(component)}</ul>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+    <p class="market-regime-note">市况分用于决定 risk_on / neutral / risk_off 和目标总杠杆；指数量价结构分单独用于调节买入折价、卖出溢价。</p>
+  `;
+}
+
 function renderRun(plan) {
   const ordersBody = $("ordersBody");
   const positionsBody = $("positionsPlanBody");
@@ -1815,6 +1952,7 @@ function renderRun(plan) {
     $("metricMargin").textContent = "-";
     renderExecutiveSummary(null);
     drawExposure(null);
+    renderMarketRegime(null);
     renderTechnicalAnalysis(null);
     renderResearchProcess(null);
     renderIntraday(null);
@@ -1831,6 +1969,7 @@ function renderRun(plan) {
   $("metricMargin").textContent = maintenance === null || maintenance === undefined ? "-" : `${fmtMoney(maintenance)} / ${fmtMoney(cushion)}`;
   renderExecutiveSummary(plan.executive_summary || fallbackExecutiveSummary(plan));
   drawExposure(plan);
+  renderMarketRegime(plan);
   renderTechnicalAnalysis(plan.technical_analysis);
   renderResearchProcess(plan.research_process);
   renderIntraday(plan.intraday);

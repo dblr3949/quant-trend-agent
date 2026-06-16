@@ -1,6 +1,6 @@
 {
   "symbols": ["MU", "AAOI", "INTC", "LITE", "MRVL"],
-  "market_proxies": ["SPY", "SMH", "SOXX", "VIXY"],
+  "market_proxies": ["SPY", "SMH", "SOXX", "^VIX"],
   "core_symbols": ["MU", "MRVL", "LITE"],
   "base_target_weights": {
     "MU": 0.42,

@@ -38,7 +38,7 @@ class TechnicalSnapshot:
 
 DEFAULT_CONFIG = {
     "symbols": ["MU", "AAOI", "INTC", "LITE", "MRVL"],
-    "market_proxies": ["SPY", "SMH", "SOXX", "VIXY"],
+    "market_proxies": ["SPY", "SMH", "SOXX", "^VIX"],
     "base_target_weights": {
         "MU": 0.42,
         "MRVL": 0.30,
@@ -84,6 +84,26 @@ def _score_meta(value: float | int | None, minimum: float, maximum: float, unit:
         "percentile": round(clipped * 100.0, 1),
         "clipped": position != clipped,
     }
+
+
+def _is_volatility_proxy(symbol: str) -> bool:
+    return "VIX" in str(symbol or "").upper()
+
+
+def _is_true_vix_index(symbol: str) -> bool:
+    return str(symbol or "").strip().upper() in {"^VIX", "VIX", "I:VIX"}
+
+
+def _vix_level_contribution(symbol: str, price: float) -> tuple[float, str, str]:
+    if price >= 30:
+        return -4.0, "panic_vix", "VIX >= 30，波动率进入恐慌区，风险资产降权。"
+    if price >= 25:
+        return -2.0, "elevated_vix", "VIX >= 25，波动率偏高，风险偏好收缩。"
+    if price <= 18:
+        return 2.0, "calm_vix", "VIX <= 18，波动率低位，风险偏好加分。"
+    if price <= 22:
+        return 1.0, "normal_vix", "VIX <= 22，波动率正常偏低，轻度加分。"
+    return 0.0, "middle_vix", f"{symbol} 位于 22~25 中性区间。"
 
 
 def load_json(path: str | Path | None) -> dict:
@@ -301,6 +321,7 @@ def _intraday_reason(summary: dict | None) -> tuple[float, str | None]:
 def classify_market_regime(snapshots: dict[str, TechnicalSnapshot], config: dict, research: dict, intraday: dict[str, dict] | None = None) -> dict:
     score = 0.0
     reasons: list[str] = []
+    components: list[dict] = []
     proxies = [symbol.upper() for symbol in config.get("market_proxies", [])]
     intraday = intraday or {}
 
@@ -308,48 +329,141 @@ def classify_market_regime(snapshots: dict[str, TechnicalSnapshot], config: dict
         snap = snapshots.get(symbol)
         if not snap:
             reasons.append(f"{symbol}:missing")
+            components.append({"symbol": symbol, "role": "missing", "score": 0.0, "contributions": [], "missing": True})
             continue
-        if "VIX" in symbol:
-            if snap.price >= 30:
-                score -= 4
-                reasons.append(f"{symbol}:panic_vix")
-            elif snap.price >= 25:
-                score -= 2
-                reasons.append(f"{symbol}:elevated_vix")
-            elif snap.price <= 18:
-                score += 2
-                reasons.append(f"{symbol}:calm_vix")
-            elif snap.price <= 22:
-                score += 1
-                reasons.append(f"{symbol}:normal_vix")
+        component_score = 0.0
+        component = {
+            "symbol": symbol,
+            "role": "volatility_index" if _is_volatility_proxy(symbol) else "risk_asset",
+            "price": round(snap.price, 4),
+            "source": snap.source,
+            "quote_asof": snap.quote_asof,
+            "quote_age_minutes": None if snap.quote_age_minutes is None else round(snap.quote_age_minutes, 2),
+            "sma20": round(snap.sma20, 4) if snap.sma20 else None,
+            "sma50": round(snap.sma50, 4) if snap.sma50 else None,
+            "contributions": [],
+        }
+        if _is_volatility_proxy(symbol):
+            level_score, level_reason, detail = _vix_level_contribution(symbol, snap.price)
+            if not _is_true_vix_index(symbol):
+                detail = detail.replace("VIX", "VIX 代理")
+            score += level_score
+            component_score += level_score
+            reasons.append(f"{symbol}:{level_reason}")
+            component["contributions"].append(
+                {
+                    "name": "VIX绝对水平" if _is_true_vix_index(symbol) else "波动率代理水平",
+                    "score": round(level_score, 2),
+                    "score_range": _score_meta(level_score, -4, 2),
+                    "reason": level_reason,
+                    "detail": detail,
+                    "reference": ">=30 恐慌；25~30 偏高；22~25 中性；18~22 正常偏低；<=18 低波动。",
+                }
+            )
             day = intraday.get(symbol)
             if day:
                 intraday_score = max(-1.5, min(1.5, float(day.get("score", 0)) * -0.35))
                 if intraday_score:
                     score += intraday_score
+                    component_score += intraday_score
                     reasons.append(f"{symbol}:intraday_inverse_{day.get('label', 'mixed')}:{intraday_score:+.1f}")
+                component["intraday"] = {
+                    "label": day.get("label"),
+                    "score": day.get("score"),
+                    "score_range": day.get("score_range"),
+                    "regime_contribution": round(intraday_score, 2),
+                    "from_open_pct": day.get("from_open_pct"),
+                    "from_vwap_pct": day.get("from_vwap_pct"),
+                    "last_30m_pct": day.get("last_30m_pct"),
+                    "range_position": day.get("range_position"),
+                }
+                component["contributions"].append(
+                    {
+                        "name": "日内反向趋势",
+                        "score": round(intraday_score, 2),
+                        "score_range": _score_meta(intraday_score, -1.5, 1.5),
+                        "reason": f"intraday_inverse_{day.get('label', 'mixed')}",
+                        "detail": "VIX 日内走强代表风险偏好下降；VIX 日内走弱代表风险偏好改善。",
+                        "reference": "分钟线原始分 -5~+5，乘以 -0.35 后封顶 ±1.5。",
+                    }
+                )
+            component["score"] = round(component_score, 2)
+            component["score_range"] = _score_meta(component_score, -6, 4)
+            components.append(component)
             continue
 
         if snap.sma20 and snap.price > snap.sma20:
-            score += 1
+            contribution = 1.0
             reasons.append(f"{symbol}:above_sma20")
+            detail = "现价站上20日均线，短中期风险资产趋势加分。"
         else:
-            score -= 1
+            contribution = -1.0
             reasons.append(f"{symbol}:below_sma20")
+            detail = "现价低于20日均线，短线趋势转弱扣分。"
+        score += contribution
+        component_score += contribution
+        component["contributions"].append(
+            {
+                "name": "20日均线",
+                "score": contribution,
+                "score_range": _score_meta(contribution, -1, 1),
+                "reason": "above_sma20" if contribution > 0 else "below_sma20",
+                "detail": detail,
+                "reference": "站上 +1；跌破 -1。",
+            }
+        )
 
         if snap.sma50 and snap.price > snap.sma50:
-            score += 1
+            contribution = 1.0
             reasons.append(f"{symbol}:above_sma50")
+            detail = "现价站上50日均线，中期趋势加分。"
         else:
-            score -= 2
+            contribution = -2.0
             reasons.append(f"{symbol}:below_sma50")
+            detail = "现价跌破50日均线，中期趋势风险更高，扣分更重。"
+        score += contribution
+        component_score += contribution
+        component["contributions"].append(
+            {
+                "name": "50日均线",
+                "score": contribution,
+                "score_range": _score_meta(contribution, -2, 1),
+                "reason": "above_sma50" if contribution > 0 else "below_sma50",
+                "detail": detail,
+                "reference": "站上 +1；跌破 -2。",
+            }
+        )
 
         day = intraday.get(symbol)
         if day:
             intraday_score = max(-1.5, min(1.5, float(day.get("score", 0)) * 0.35))
             if intraday_score:
                 score += intraday_score
+                component_score += intraday_score
                 reasons.append(f"{symbol}:intraday_{day.get('label', 'mixed')}:{intraday_score:+.1f}")
+            component["intraday"] = {
+                "label": day.get("label"),
+                "score": day.get("score"),
+                "score_range": day.get("score_range"),
+                "regime_contribution": round(intraday_score, 2),
+                "from_open_pct": day.get("from_open_pct"),
+                "from_vwap_pct": day.get("from_vwap_pct"),
+                "last_30m_pct": day.get("last_30m_pct"),
+                "range_position": day.get("range_position"),
+            }
+            component["contributions"].append(
+                {
+                    "name": "当日分钟线",
+                    "score": round(intraday_score, 2),
+                    "score_range": _score_meta(intraday_score, -1.5, 1.5),
+                    "reason": f"intraday_{day.get('label', 'mixed')}",
+                    "detail": "开盘至今、VWAP、近30分钟和日内区间位置合成后，按 0.35 权重进入市场状态。",
+                    "reference": "分钟线原始分 -5~+5，乘以 +0.35 后封顶 ±1.5。",
+                }
+            )
+        component["score"] = round(component_score, 2)
+        component["score_range"] = _score_meta(component_score, -5, 4)
+        components.append(component)
 
     macro_bias = _bias_from_research(research)
     if macro_bias:
@@ -386,6 +500,7 @@ def classify_market_regime(snapshots: dict[str, TechnicalSnapshot], config: dict
         "score_range": _score_meta(score, -10, 10),
         "target_gross_exposure": target_gross,
         "reasons": reasons,
+        "components": components,
     }
 
 
@@ -1552,11 +1667,12 @@ def _price_volume_multiplier(analysis: dict | None) -> tuple[float, list[str]]:
 
 def _market_structure_context(analyses: dict[str, dict], regime: dict) -> dict:
     components = []
-    for symbol in ("SPY", "SMH", "SOXX"):
-        if symbol in analyses:
-            components.append({"symbol": symbol, "score": float(analyses[symbol].get("score") or 0.0), "direction": "risk"})
-    if "VIXY" in analyses:
-        components.append({"symbol": "VIXY", "score": -float(analyses["VIXY"].get("score") or 0.0), "direction": "inverse_vol"})
+    for symbol in sorted(analyses):
+        raw_score = float(analyses[symbol].get("score") or 0.0)
+        if _is_volatility_proxy(symbol):
+            components.append({"symbol": symbol, "score": -raw_score, "raw_score": raw_score, "direction": "inverse_vol"})
+        else:
+            components.append({"symbol": symbol, "score": raw_score, "raw_score": raw_score, "direction": "risk"})
     if components:
         score = sum(item["score"] for item in components) / len(components)
     else:
@@ -1577,7 +1693,7 @@ def _market_structure_context(analyses: dict[str, dict], regime: dict) -> dict:
         "score": score,
         "score_range": _score_meta(score, -6, 6),
         "components": components,
-        "usage": "SPY/SMH/SOXX 量价分与 VIXY 反向量价分，用于调节买入折价和卖出溢价。",
+        "usage": "SPY/SMH/SOXX 量价分与 ^VIX 反向量价分，用于调节买入折价和卖出溢价。",
     }
 
 

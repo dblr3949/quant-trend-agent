@@ -61,7 +61,7 @@ class AgentTests(unittest.TestCase):
             latest = {}
             for symbol, price in {"MU": 100, "AAOI": 20, "INTC": 30, "LITE": 60, "MRVL": 75, "SPY": 500, "SMH": 250, "SOXX": 220}.items():
                 latest[symbol] = write_bars(tmp, symbol, price)
-            latest["VIXY"] = write_bars(tmp, "VIXY", 16, drift=0.0)
+            latest["^VIX"] = write_bars(tmp, "^VIX", 16, drift=0.0)
 
             asof = datetime.now(timezone.utc).isoformat()
             quotes = {
@@ -73,7 +73,7 @@ class AgentTests(unittest.TestCase):
                 "SPY": Quote("SPY", latest["SPY"], asof=asof, source="test"),
                 "SMH": Quote("SMH", latest["SMH"], asof=asof, source="test"),
                 "SOXX": Quote("SOXX", latest["SOXX"], asof=asof, source="test"),
-                "VIXY": Quote("VIXY", latest["VIXY"], asof=asof, source="test"),
+                "^VIX": Quote("^VIX", latest["^VIX"], asof=asof, source="test"),
             }
             portfolio = Portfolio(
                 account_equity=100000,
@@ -104,7 +104,7 @@ class AgentTests(unittest.TestCase):
 
     def test_stale_quotes_block_add_orders(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for symbol, price in {"MU": 100, "SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
+            for symbol, price in {"MU": 100, "SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
                 write_bars(tmp, symbol, price)
             stale = "2020-01-01T14:30:00+00:00"
             quotes = {
@@ -112,7 +112,7 @@ class AgentTests(unittest.TestCase):
                 "SPY": Quote("SPY", 700, asof=stale, source="test"),
                 "SMH": Quote("SMH", 350, asof=stale, source="test"),
                 "SOXX": Quote("SOXX", 300, asof=stale, source="test"),
-                "VIXY": Quote("VIXY", 16, asof=stale, source="test"),
+                "^VIX": Quote("^VIX", 16, asof=stale, source="test"),
             }
             portfolio = Portfolio(account_equity=100000, cash=100000, positions={})
             config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
@@ -125,7 +125,7 @@ class AgentTests(unittest.TestCase):
     def test_hard_prompt_no_add_blocks_buy_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             latest = write_bars(tmp, "MU", 100)
-            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
+            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
                 write_bars(tmp, symbol, price)
             asof = datetime.now(timezone.utc).isoformat()
             quotes = {
@@ -133,7 +133,7 @@ class AgentTests(unittest.TestCase):
                 "SPY": Quote("SPY", 500, asof=asof, source="test"),
                 "SMH": Quote("SMH", 250, asof=asof, source="test"),
                 "SOXX": Quote("SOXX", 220, asof=asof, source="test"),
-                "VIXY": Quote("VIXY", 16, asof=asof, source="test"),
+                "^VIX": Quote("^VIX", 16, asof=asof, source="test"),
             }
             portfolio = Portfolio(account_equity=100000, cash=100000, positions={})
             config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
@@ -147,7 +147,7 @@ class AgentTests(unittest.TestCase):
     def test_soft_prompt_no_add_can_be_overridden(self):
         with tempfile.TemporaryDirectory() as tmp:
             latest = write_bars(tmp, "MU", 100)
-            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
+            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
                 write_bars(tmp, symbol, price)
             asof = datetime.now(timezone.utc).isoformat()
             quotes = {
@@ -155,7 +155,7 @@ class AgentTests(unittest.TestCase):
                 "SPY": Quote("SPY", 700, asof=asof, source="test"),
                 "SMH": Quote("SMH", 350, asof=asof, source="test"),
                 "SOXX": Quote("SOXX", 300, asof=asof, source="test"),
-                "VIXY": Quote("VIXY", 16, asof=asof, source="test"),
+                "^VIX": Quote("^VIX", 16, asof=asof, source="test"),
             }
             intraday = {
                 "MU": [
@@ -182,7 +182,7 @@ class AgentTests(unittest.TestCase):
     def test_prompt_range_trade_creates_soft_flat_buy_and_sell_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             latest = write_bars(tmp, "MU", 100)
-            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
+            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
                 write_bars(tmp, symbol, price)
             asof = datetime.now(timezone.utc).isoformat()
             quotes = {
@@ -190,7 +190,7 @@ class AgentTests(unittest.TestCase):
                 "SPY": Quote("SPY", 700, asof=asof, source="test"),
                 "SMH": Quote("SMH", 350, asof=asof, source="test"),
                 "SOXX": Quote("SOXX", 300, asof=asof, source="test"),
-                "VIXY": Quote("VIXY", 16, asof=asof, source="test"),
+                "^VIX": Quote("^VIX", 16, asof=asof, source="test"),
             }
             portfolio = Portfolio(account_equity=100000, cash=100000, positions={"MU": Position("MU", 100, 100)})
             config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
@@ -214,7 +214,7 @@ class AgentTests(unittest.TestCase):
     def test_prompt_range_trade_required_flat_still_pairs_shares(self):
         with tempfile.TemporaryDirectory() as tmp:
             latest = write_bars(tmp, "MU", 100)
-            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
+            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
                 write_bars(tmp, symbol, price)
             asof = datetime.now(timezone.utc).isoformat()
             quotes = {
@@ -222,7 +222,7 @@ class AgentTests(unittest.TestCase):
                 "SPY": Quote("SPY", 700, asof=asof, source="test"),
                 "SMH": Quote("SMH", 350, asof=asof, source="test"),
                 "SOXX": Quote("SOXX", 300, asof=asof, source="test"),
-                "VIXY": Quote("VIXY", 16, asof=asof, source="test"),
+                "^VIX": Quote("^VIX", 16, asof=asof, source="test"),
             }
             portfolio = Portfolio(account_equity=100000, cash=100000, positions={"MU": Position("MU", 100, 100)})
             config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
@@ -282,7 +282,7 @@ class AgentTests(unittest.TestCase):
     def test_low_margin_cushion_blocks_new_buys(self):
         with tempfile.TemporaryDirectory() as tmp:
             latest = write_bars(tmp, "MU", 100)
-            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "VIXY": 16}.items():
+            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
                 write_bars(tmp, symbol, price)
             asof = datetime.now(timezone.utc).isoformat()
             quotes = {
@@ -290,7 +290,7 @@ class AgentTests(unittest.TestCase):
                 "SPY": Quote("SPY", 700, asof=asof, source="test"),
                 "SMH": Quote("SMH", 350, asof=asof, source="test"),
                 "SOXX": Quote("SOXX", 300, asof=asof, source="test"),
-                "VIXY": Quote("VIXY", 16, asof=asof, source="test"),
+                "^VIX": Quote("^VIX", 16, asof=asof, source="test"),
             }
             portfolio = Portfolio(account_equity=100000, cash=100000, maintenance_margin=80000, positions={})
             config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}

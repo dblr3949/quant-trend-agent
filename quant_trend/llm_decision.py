@@ -138,9 +138,8 @@ def _compact_plan(plan: dict) -> dict:
         "regime": plan.get("regime", {}),
         "market_structure": plan.get("market_structure", {}),
         "market_technical_analysis": {
-            symbol: _compact_technical(market_technical.get(symbol))
-            for symbol in ("SPY", "SMH", "SOXX", "VIXY")
-            if symbol in market_technical
+            symbol: _compact_technical(item)
+            for symbol, item in sorted(market_technical.items())
         },
         "orders": orders,
         "trade_groups": [
@@ -285,7 +284,7 @@ def _call_openai_decisions(compact: dict, model: str | None = None) -> dict | No
         "每张单的主执行 candidate_id 只能从 candidate_levels 里选择；若 candidate_levels 为空，candidate_id 返回 null。"
         "另外你必须为每张单输出 2到3 档 reference_ladder，作为用户参考价梯；价梯价格可由你自行决定，不必等于候选价，"
         "但必须在输入的 ladder_price_bounds 内，且买入价低于现价、卖出价高于现价。"
-        "必须同时考虑个股量价、筹码/成交占比、支撑压力力度、SPY/SMH/SOXX/VIXY、杠杆和保证金。"
+        "必须同时考虑个股量价、筹码/成交占比、支撑压力力度、SPY/SMH/SOXX/^VIX、杠杆和保证金。"
         "必须读取用户本轮 prompt、prompt_overlay 和 decision_context；明确禁止/绝对类约束不可违反，普通偏好可被强证据反驳但要说明。"
         "如果订单属于 range_trade/做T，同一标的的买腿和卖腿不必机械相等；"
         "flat_preferred 表示用户偏好净仓位接近不变，但你可以根据指标与prompt决定净加仓、净减仓或净持平；"

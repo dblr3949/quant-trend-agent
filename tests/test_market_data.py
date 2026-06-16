@@ -106,6 +106,32 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(rows[1]["close"], 12.0)
         self.assertEqual(rows[1]["volume"], 2000.0)
 
+    def test_massive_vix_daily_uses_polygon_index_ticker(self):
+        client = FakeMassiveDataClient(
+            {
+                "/v2/aggs/ticker/I%3AVIX/range/1/day/2026-06-01/2026-06-02": {
+                    "results": [
+                        {"t": 1780272000000, "o": 18, "h": 20, "l": 17, "c": 19, "v": 0},
+                    ]
+                }
+            }
+        )
+
+        rows = client.fetch_daily_bars("^VIX", "2026-06-01", "2026-06-02")
+
+        self.assertEqual(rows[0]["close"], 19.0)
+        self.assertEqual(rows[0]["volume"], 0.0)
+
+    def test_massive_index_snapshot_quote_parses_value(self):
+        client = MassiveDataClient(api_key="test-key", base_url="http://example.test")
+
+        quote = client._index_snapshot_quote("^VIX", {"results": {"value": 21.5, "timestamp": 1780358400000}})
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.symbol, "^VIX")
+        self.assertEqual(quote.price, 21.5)
+        self.assertTrue(quote.source.startswith("massive:index_snapshot"))
+
 
 if __name__ == "__main__":
     unittest.main()

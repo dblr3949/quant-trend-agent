@@ -136,10 +136,10 @@ ALPACA_DATA_FEED=sip python3 scripts/download_data.py --market us --provider alp
 
 ### 1. 准备日线
 
-至少下载这些标的的日线。`VIXY` 是便于用股票行情源获取的 VIX 代理；如果你的数据源支持指数，也可以把配置里的 `VIXY` 改成 `^VIX`。
+至少下载这些标的的日线。默认使用 `^VIX` 作为真实 VIX 指数；Massive/Polygon 侧会映射到 `I:VIX`，如果指数权限不可用会对 `^VIX` 使用 Yahoo Chart 兜底。
 
 ```bash
-for s in MU AAOI INTC LITE MRVL SPY SMH SOXX VIXY; do
+for s in MU AAOI INTC LITE MRVL SPY SMH SOXX ^VIX; do
   python3 scripts/download_data.py --market us --symbol "$s" --start 2024-01-01
 done
 ```
@@ -219,7 +219,7 @@ MASSIVE_WS_URL=ws://44.219.45.87:8080/ws
 默认拉 Massive 行情：
 
 ```bash
-python3 scripts/fetch_quotes.py --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
+python3 scripts/fetch_quotes.py --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
 ```
 
 IBKR 仍可作为备用。启动 TWS 或 IB Gateway 后，在 API 设置中启用 Socket 客户端，并确认端口：
@@ -229,7 +229,7 @@ python3 scripts/fetch_quotes.py --provider ibkr \
   --ibkr-host 127.0.0.1 \
   --ibkr-port 7497 \
   --ibkr-client-id 81 \
-  --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
+  --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
 ```
 
 如果这个 IBKR 账号没有订阅实时美股行情，可以先用延迟行情测试链路：
@@ -237,7 +237,7 @@ python3 scripts/fetch_quotes.py --provider ibkr \
 ```bash
 python3 scripts/fetch_quotes.py --provider ibkr \
   --ibkr-market-data-type 3 \
-  --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
+  --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
 ```
 
 IBKR 脚本不会调用账户/仓位/订单接口；你的真实仓位只来自 `config/portfolio.json` 或网页表格。
@@ -246,13 +246,13 @@ Alpaca 仍可作为备用：
 
 ```bash
 ALPACA_API_KEY=... ALPACA_API_SECRET=... ALPACA_DATA_FEED=sip \
-  python3 scripts/fetch_quotes.py --provider alpaca --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
+  python3 scripts/fetch_quotes.py --provider alpaca --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
 ```
 
 没有数据账号时可先演示：
 
 ```bash
-python3 scripts/fetch_quotes.py --provider yfinance --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,VIXY
+python3 scripts/fetch_quotes.py --provider yfinance --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
 ```
 
 ### 4. 更新事件/研报覆盖

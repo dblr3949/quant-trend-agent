@@ -273,6 +273,17 @@ def _bar_size_to_polygon(bar_size: str) -> tuple[int, str]:
     return mapping.get(normalized, (5, "minute"))
 
 
+def _polygon_ticker(symbol: str) -> str:
+    normalized = str(symbol or "").strip().upper()
+    if normalized in {"^VIX", "VIX", "I:VIX"}:
+        return "I:VIX"
+    return normalized
+
+
+def _is_vix_index_symbol(symbol: str) -> bool:
+    return str(symbol or "").strip().upper() in {"^VIX", "VIX", "I:VIX"}
+
+
 def _duration_to_calendar_days(duration: str) -> int:
     match = str(duration or "1 D").strip().upper().split()
     if len(match) >= 2:
@@ -378,8 +389,77 @@ class MassiveDataClient:
             source=f"massive:snapshot:{price_kind}",
         )
 
+    def _index_snapshot_quote(self, symbol: str, payload: dict, source: str = "massive:index_snapshot") -> Quote | None:
+        raw = payload.get("results") or payload.get("ticker") or payload
+        if isinstance(raw, list):
+            raw = raw[0] if raw else {}
+        if not isinstance(raw, dict):
+            return None
+        session = raw.get("session") or {}
+        last = raw.get("last") or raw.get("lastTrade") or {}
+        day = raw.get("day") or {}
+        minute = raw.get("min") or raw.get("minute") or {}
+        candidates = [
+            ("value", _float_or_none(raw.get("value") or raw.get("price") or raw.get("last_value")), raw.get("timestamp") or raw.get("t")),
+            ("last", _float_or_none(last.get("p") or last.get("price") or last.get("value")), last.get("t") or last.get("timestamp")),
+            ("session", _float_or_none(session.get("close") or session.get("last") or session.get("value")), session.get("timestamp") or raw.get("updated")),
+            ("day", _float_or_none(day.get("c") or day.get("close")), day.get("t") or raw.get("updated")),
+            ("minute", _float_or_none(minute.get("c") or minute.get("close")), minute.get("t") or raw.get("updated")),
+            ("prev_close", _float_or_none(session.get("previous_close") or raw.get("previous_close")), None),
+        ]
+        for kind, price, timestamp in candidates:
+            if price is None:
+                continue
+            return Quote(
+                symbol=symbol.upper(),
+                price=price,
+                asof=_polygon_timestamp_to_iso(timestamp) or (None if kind == "prev_close" else datetime.now(timezone.utc).isoformat()),
+                source=f"{source}:{kind}",
+            )
+        return None
+
+    def _aggregate_quote(self, symbol: str, timespan: str = "minute") -> Quote | None:
+        ticker = quote(_polygon_ticker(symbol), safe="")
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=7 if timespan == "minute" else 14)
+        payload = self._get_json(
+            f"/v2/aggs/ticker/{ticker}/range/1/{timespan}/{start_date.isoformat()}/{end_date.isoformat()}",
+            {"adjusted": "true", "sort": "asc", "limit": "50000"},
+        )
+        rows = [row for row in payload.get("results") or [] if row.get("c") not in (None, "")]
+        if not rows:
+            return None
+        row = rows[-1]
+        return Quote(
+            symbol=symbol.upper(),
+            price=float(row["c"]),
+            asof=_polygon_timestamp_to_iso(row.get("t")),
+            source=f"massive:{'index_' if _is_vix_index_symbol(symbol) else ''}agg:{timespan}",
+        )
+
+    def _latest_index_quote(self, symbol: str) -> Quote | None:
+        ticker = quote(_polygon_ticker(symbol), safe="")
+        for path, source in [
+            (f"/v3/snapshot/indices/{ticker}", "massive:index_snapshot"),
+            (f"/v2/snapshot/locale/global/markets/indices/tickers/{ticker}", "massive:index_snapshot_v2"),
+        ]:
+            try:
+                quote_item = self._index_snapshot_quote(symbol, self._get_json(path), source)
+                if quote_item is not None:
+                    return quote_item
+            except Exception:
+                continue
+        for timespan in ("minute", "day"):
+            try:
+                quote_item = self._aggregate_quote(symbol, timespan)
+                if quote_item is not None:
+                    return quote_item
+            except Exception:
+                continue
+        return None
+
     def _last_trade_quote(self, symbol: str) -> Quote | None:
-        trade_payload = self._get_json(f"/v2/last/trade/{quote(symbol.upper(), safe='')}")
+        trade_payload = self._get_json(f"/v2/last/trade/{quote(_polygon_ticker(symbol), safe='')}")
         trade = trade_payload.get("results") or trade_payload.get("last") or {}
         price = _float_or_none(trade.get("p") or trade.get("price"))
         if price is None:
@@ -398,10 +478,13 @@ class MassiveDataClient:
         self.last_symbol_errors = {}
         for symbol in [item.upper() for item in symbols]:
             try:
-                payload = self._get_json(f"/v2/snapshot/locale/us/markets/stocks/tickers/{quote(symbol, safe='')}")
-                quote_item = self._snapshot_quote(symbol, payload)
-                if quote_item is None:
-                    quote_item = self._last_trade_quote(symbol)
+                if _is_vix_index_symbol(symbol):
+                    quote_item = self._latest_index_quote(symbol)
+                else:
+                    payload = self._get_json(f"/v2/snapshot/locale/us/markets/stocks/tickers/{quote(_polygon_ticker(symbol), safe='')}")
+                    quote_item = self._snapshot_quote(symbol, payload)
+                    if quote_item is None:
+                        quote_item = self._last_trade_quote(symbol)
                 if quote_item is not None:
                     quotes[symbol] = quote_item
                 else:
@@ -421,7 +504,7 @@ class MassiveDataClient:
     def fetch_daily_bars(self, symbol: str, start: str, end: str | None = None) -> list[dict[str, float | str]]:
         end_value = end or datetime.now(timezone.utc).date().isoformat()
         payload = self._get_json(
-            f"/v2/aggs/ticker/{quote(symbol.upper(), safe='')}/range/1/day/{start}/{end_value}",
+            f"/v2/aggs/ticker/{quote(_polygon_ticker(symbol), safe='')}/range/1/day/{start}/{end_value}",
             {"adjusted": "true", "sort": "asc", "limit": "50000"},
         )
         rows = []
@@ -454,8 +537,9 @@ class MassiveDataClient:
         self.last_symbol_errors = {}
         for symbol in [item.upper() for item in symbols]:
             try:
+                ticker = quote(_polygon_ticker(symbol), safe="")
                 payload = self._get_json(
-                    f"/v2/aggs/ticker/{quote(symbol, safe='')}/range/{multiplier}/{timespan}/{start_date.isoformat()}/{end_date.isoformat()}",
+                    f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{start_date.isoformat()}/{end_date.isoformat()}",
                     {"adjusted": "true", "sort": "asc", "limit": "50000"},
                 )
                 bar_pairs = []

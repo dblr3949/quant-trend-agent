@@ -118,10 +118,7 @@ def _reason_text(raw: str) -> str:
 def _market_proxy_text(plan: dict) -> str:
     analyses = plan.get("market_technical_analysis", {}) or {}
     parts = []
-    for symbol in ("SPY", "SMH", "SOXX", "VIXY"):
-        item = analyses.get(symbol)
-        if not item:
-            continue
+    for symbol, item in sorted(analyses.items()):
         parts.append(f"{symbol}{_score_text(item.get('score'), item.get('score_range'), -6, 6)}")
     return "，".join(parts)
 
@@ -365,7 +362,7 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None, f
     system = (
         "你是美股半导体仓位管理助手。只做中文摘要，不给投资保证。"
         "必须基于输入数据，每只股票一段话；必须覆盖输入positions里的全部symbol。"
-        "开头必须先写一段整体市场框架，明确覆盖 SPY、SMH、SOXX、VIXY；缺数据就写缺数据。"
+        "开头必须先写一段整体市场框架，明确覆盖 SPY、SMH、SOXX、^VIX；缺数据就写缺数据。"
         "每段可以较完整，但要分段清楚；不要因为篇幅省略任何持仓股票。"
         "优先解释近期量价技术面：支撑、压力、Volume Profile、POC/VAH/VAL/HVN/LVN、筹码占比、VWAP、高量区、20日量比、日内趋势。"
         "如存在 llm_limit_decisions 或 order.llm_limit_decision，要说明模型选择的候选点位依据。"

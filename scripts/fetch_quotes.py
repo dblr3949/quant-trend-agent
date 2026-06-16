@@ -32,7 +32,7 @@ def _parse_symbols(value: str | None, watchlist: str | None) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", choices=["massive", "alpaca", "ibkr", "yfinance"], default="massive")
-    parser.add_argument("--symbols", help="Comma-separated symbols, e.g. MU,AAOI,SPY,SMH,SOXX,VIXY")
+    parser.add_argument("--symbols", help="Comma-separated symbols, e.g. MU,AAOI,SPY,SMH,SOXX,^VIX")
     parser.add_argument("--watchlist")
     parser.add_argument("--feed", help="Alpaca feed, usually sip for consolidated data or iex for basic testing")
     parser.add_argument("--ibkr-host", default=None, help="IBKR TWS/Gateway host, default IBKR_HOST or 127.0.0.1")
