@@ -1,7 +1,7 @@
 import json
 import math
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, timedelta, time as dt_time, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -24,6 +24,8 @@ class TechnicalSnapshot:
     price: float
     source: str
     quote_age_minutes: float | None
+    bid: float | None
+    ask: float | None
     close: float | None
     sma20: float | None
     sma50: float | None
@@ -222,6 +224,8 @@ def build_snapshot(symbol: str, bars: list[Bar], quote: Quote | None = None) -> 
         price=float(price),
         source=source,
         quote_age_minutes=quote_age,
+        bid=quote.bid if quote else None,
+        ask=quote.ask if quote else None,
         close=close,
         sma20=sma20,
         sma50=sma50,
@@ -1097,6 +1101,10 @@ def _effective_quote_age_limit(session: str, risk: dict) -> float:
     return float(risk.get("max_quote_age_minutes_closed", 0.0))
 
 
+def _hard_quote_age_limit(risk: dict) -> float:
+    return float(risk.get("max_quote_age_minutes_hard", 60.0 * 24.0 * 3.0))
+
+
 def _should_append_current_bar(
     last_bar: Bar | None,
     price: float,
@@ -1303,28 +1311,122 @@ def _swing_levels_from_daily(bars: list[Bar], side: str, reference_price: float)
     return levels
 
 
+def _anchor_label(anchor_type: str, window: int | None = None) -> str:
+    labels = {
+        "window_low": f"{window or ''}日低点",
+        "window_high": f"{window or ''}日高点",
+        "volume_shock_up": "放量上攻",
+        "volume_shock_down": "放量下杀",
+        "gap_up": "跳空上行",
+        "gap_down": "跳空下行",
+        "breakout": "平台突破",
+        "breakdown": "平台跌破",
+        "swing_low": "摆动低点",
+        "swing_high": "摆动高点",
+        "earnings_like_shock": "财报式冲击",
+    }
+    return labels.get(anchor_type, anchor_type)
+
+
+def _daily_anchor_candidates(bars: list[Bar]) -> list[dict]:
+    valid = [bar for bar in bars if bar.volume > 0 and bar.high > 0 and bar.low > 0 and bar.close > 0 and bar.open > 0]
+    if len(valid) < 20:
+        return []
+    candidates: list[dict] = []
+
+    def add(index: int, anchor_type: str, window: int | None = None, reason: str = "") -> None:
+        if index < 0 or index >= len(valid):
+            return
+        bar = valid[index]
+        previous = valid[index - 1] if index > 0 else None
+        recent20 = valid[max(0, index - 20) : index]
+        avg_volume20 = sum(item.volume for item in recent20) / len(recent20) if recent20 else None
+        volume_ratio = bar.volume / avg_volume20 if avg_volume20 and avg_volume20 > 0 else None
+        day_return = (bar.close / bar.open - 1.0) if bar.open else 0.0
+        gap_return = (bar.open / previous.close - 1.0) if previous and previous.close > 0 else None
+        candidates.append(
+            {
+                "index": index,
+                "date": bar.date.isoformat(),
+                "type": anchor_type,
+                "label": _anchor_label(anchor_type, window),
+                "window": window,
+                "price": round((bar.high + bar.low + bar.close) / 3.0, 4),
+                "return_pct": round(day_return, 5),
+                "gap_pct": round(gap_return, 5) if gap_return is not None else None,
+                "volume_ratio20": round(volume_ratio, 3) if volume_ratio is not None else None,
+                "reason": reason,
+            }
+        )
+
+    for window in (20, 60, 90, 126):
+        recent = valid[-window:]
+        if len(recent) < max(10, window // 3):
+            continue
+        start = len(valid) - len(recent)
+        low_index, _ = min(enumerate(recent, start=start), key=lambda item: item[1].low)
+        high_index, _ = max(enumerate(recent, start=start), key=lambda item: item[1].high)
+        add(low_index, "window_low", window, f"近{window}日低点锚定")
+        add(high_index, "window_high", window, f"近{window}日高点锚定")
+
+    for index in range(max(1, len(valid) - 126), len(valid)):
+        bar = valid[index]
+        prev = valid[index - 1]
+        recent20 = valid[max(0, index - 20) : index]
+        recent60 = valid[max(0, index - 60) : index]
+        if not recent20:
+            continue
+        avg_volume20 = sum(item.volume for item in recent20) / len(recent20)
+        volume_ratio = bar.volume / avg_volume20 if avg_volume20 > 0 else 0.0
+        day_return = (bar.close / bar.open - 1.0) if bar.open else 0.0
+        gap_return = (bar.open / prev.close - 1.0) if prev.close > 0 else 0.0
+        prior_high = max((item.high for item in recent60), default=bar.high)
+        prior_low = min((item.low for item in recent60), default=bar.low)
+        if volume_ratio >= 1.75 and day_return >= 0.035:
+            add(index, "volume_shock_up", None, "放量阳线，后续常作为多空成本锚")
+        if volume_ratio >= 1.75 and day_return <= -0.035:
+            add(index, "volume_shock_down", None, "放量阴线，后续常作为供给压力锚")
+        if gap_return >= 0.035 and volume_ratio >= 1.15:
+            add(index, "gap_up", None, "跳空上行，VWAP 常成为突破回踩参考")
+        if gap_return <= -0.035 and volume_ratio >= 1.15:
+            add(index, "gap_down", None, "跳空下行，VWAP 常成为反弹压力参考")
+        if len(recent60) >= 20 and bar.close > prior_high and volume_ratio >= 1.15:
+            add(index, "breakout", None, "收盘突破近60日平台高点")
+        if len(recent60) >= 20 and bar.close < prior_low and volume_ratio >= 1.15:
+            add(index, "breakdown", None, "收盘跌破近60日平台低点")
+        if abs(day_return) >= 0.08 and volume_ratio >= 1.5:
+            add(index, "earnings_like_shock", None, "大幅波动叠加放量，近似财报/重大消息冲击锚")
+
+    for index in range(max(2, len(valid) - 90), len(valid) - 2):
+        window = valid[index - 2 : index + 3]
+        bar = valid[index]
+        if bar.low == min(item.low for item in window):
+            add(index, "swing_low", 90, "近90日摆动低点")
+        if bar.high == max(item.high for item in window):
+            add(index, "swing_high", 90, "近90日摆动高点")
+
+    deduped: dict[tuple[int, str], dict] = {}
+    for item in candidates:
+        deduped[(int(item["index"]), str(item["type"]))] = item
+    return sorted(deduped.values(), key=lambda item: (int(item["index"]), str(item["type"])))
+
+
 def _anchored_vwap_levels_from_daily(bars: list[Bar], side: str, reference_price: float) -> list[dict]:
     valid = [bar for bar in bars if bar.volume > 0 and bar.high > 0 and bar.low > 0 and bar.close > 0]
     if len(valid) < 20:
         return []
     levels: list[dict] = []
-    anchor_indices: list[tuple[int, int, str]] = []
-    for window in (20, 60, 90):
-        recent = valid[-window:]
-        if len(recent) < max(10, window // 2):
-            continue
-        if side == "buy":
-            anchor_bar = min(recent, key=lambda item: item.low)
-            label = f"从{window}日低点锚定VWAP"
-        else:
-            anchor_bar = max(recent, key=lambda item: item.high)
-            label = f"从{window}日高点锚定VWAP"
-        index = valid.index(anchor_bar)
-        anchor_indices.append((index, window, label))
+    anchors = _daily_anchor_candidates(valid)
     seen: set[int] = set()
-    for index, window, label in anchor_indices:
-        if index in seen:
+    for anchor in sorted(anchors, key=lambda item: int(item.get("index") or 0), reverse=True):
+        index = int(anchor.get("index") or 0)
+        anchor_type = str(anchor.get("type") or "")
+        # Keep enough variety without emitting a wall of nearly identical VWAPs.
+        seen_key = round(float(anchor.get("price") or 0.0), 2)
+        if index in seen and anchor_type.startswith("window_"):
             continue
+        if len([item for item in levels if item.get("profile_role") == "anchored_vwap"]) >= 10:
+            break
         seen.add(index)
         rows = valid[index:]
         volume = sum(row.volume for row in rows)
@@ -1332,7 +1434,8 @@ def _anchored_vwap_levels_from_daily(bars: list[Bar], side: str, reference_price
             continue
         vwap = sum(((row.high + row.low + row.close) / 3.0) * row.volume for row in rows) / volume
         touch_count = sum(1 for row in rows if row.low <= vwap <= row.high)
-        recency = (valid[-1].date - rows[-1].date).days if rows else None
+        recency = (valid[-1].date - rows[0].date).days if rows else None
+        label = f"{anchor.get('label')}锚定VWAP"
         if (side == "buy" and vwap <= reference_price) or (side == "sell" and vwap >= reference_price):
             _add_level(
                 levels,
@@ -1340,10 +1443,18 @@ def _anchored_vwap_levels_from_daily(bars: list[Bar], side: str, reference_price
                 label,
                 reference_price,
                 "reference",
-                profile_window=window,
+                profile_window=anchor.get("window"),
                 profile_role="anchored_vwap",
                 touch_count=touch_count,
                 recency_days=recency,
+                anchor_date=anchor.get("date"),
+                anchor_type=anchor_type,
+                anchor_label=anchor.get("label"),
+                anchor_return_pct=anchor.get("return_pct"),
+                anchor_gap_pct=anchor.get("gap_pct"),
+                anchor_volume_ratio20=anchor.get("volume_ratio20"),
+                anchor_reason=anchor.get("reason"),
+                anchor_price=seen_key,
             )
     return levels
 
@@ -1447,6 +1558,10 @@ def _level_weight(level: dict) -> float:
         weight += 0.6
     if "20日" in source or "50日" in source:
         weight += 0.25
+    if str(level.get("profile_role") or "").lower() == "anchored_vwap":
+        weight += 0.55
+        if level.get("anchor_type") in {"volume_shock_up", "volume_shock_down", "gap_up", "gap_down", "breakout", "breakdown", "earnings_like_shock"}:
+            weight += 0.35
     if "当日" in source or ("VWAP" in source and "锚定" not in source and "区间" not in source) or "30分钟" in source:
         weight -= 0.35
     return weight
@@ -1510,6 +1625,11 @@ def _level_strength_score(level: dict, levels: list[dict], bars: list[Bar], refe
         recency_points = 0.05
     if category == "volume_void":
         volume_points *= 0.35
+    if str(level.get("profile_role") or "").lower() == "anchored_vwap":
+        anchor_ratio = float(level.get("anchor_volume_ratio20") or 0.0)
+        volume_points += min(0.55, max(0.0, anchor_ratio - 1.0) * 0.18)
+        if level.get("anchor_type") in {"breakout", "breakdown", "earnings_like_shock"}:
+            category_points += 0.18
     score = max(0.0, min(5.0, category_points + volume_points + confluence_points + touch_points + recency_points))
     return round(score, 2), {
         "confluence_count": confluence,
@@ -1655,6 +1775,14 @@ def _round_level(level: dict) -> dict:
         "recency_days": level.get("recency_days"),
         "level_strength_score": level.get("level_strength_score"),
         "level_strength_range": level.get("level_strength_range"),
+        "anchor_date": level.get("anchor_date"),
+        "anchor_type": level.get("anchor_type"),
+        "anchor_label": level.get("anchor_label"),
+        "anchor_return_pct": level.get("anchor_return_pct"),
+        "anchor_gap_pct": level.get("anchor_gap_pct"),
+        "anchor_volume_ratio20": level.get("anchor_volume_ratio20"),
+        "anchor_reason": level.get("anchor_reason"),
+        "anchor_price": level.get("anchor_price"),
     }
     for key, value in optional.items():
         if value is not None:
@@ -1731,6 +1859,129 @@ def _score_label(score: float) -> str:
     return "mixed"
 
 
+def _order_flow_context(snapshot: TechnicalSnapshot, intraday_bars: list[IntradayBar]) -> dict:
+    valid = [bar for bar in intraday_bars if bar.volume > 0 and bar.high > 0 and bar.low > 0 and bar.close > 0 and bar.open > 0]
+    bid = snapshot.bid
+    ask = snapshot.ask
+    midpoint = (bid + ask) / 2.0 if bid and ask and bid > 0 and ask > 0 else None
+    spread_pct = ((ask - bid) / midpoint) if midpoint and ask >= bid else None
+    if not valid:
+        score = -0.2 if spread_pct and spread_pct >= 0.006 else 0.0
+        return {
+            "label": "订单流缺失" if score == 0 else "价差偏宽",
+            "score": round(score, 2),
+            "score_range": _score_meta(score, -2, 2),
+            "bar_count": 0,
+            "spread_pct": round(spread_pct, 5) if spread_pct is not None else None,
+            "source": "quote_spread_only" if spread_pct is not None else "missing",
+            "detail": "没有分钟成交量，无法估算买卖压力；若有 bid/ask 仅评估价差质量。",
+        }
+
+    signed_rows = []
+    for bar in valid:
+        if bar.high > bar.low:
+            close_location = ((bar.close - bar.low) - (bar.high - bar.close)) / (bar.high - bar.low)
+        elif bar.close > bar.open:
+            close_location = 1.0
+        elif bar.close < bar.open:
+            close_location = -1.0
+        else:
+            close_location = 0.0
+        direction = 1.0 if bar.close > bar.open else -1.0 if bar.close < bar.open else close_location
+        signed = bar.volume * max(-1.0, min(1.0, 0.55 * close_location + 0.45 * direction))
+        signed_rows.append((bar, signed))
+
+    total_volume = sum(bar.volume for bar, _ in signed_rows)
+    signed_volume = sum(signed for _, signed in signed_rows)
+    buy_volume = sum(max(0.0, (bar.volume + signed) / 2.0) for bar, signed in signed_rows)
+    sell_volume = sum(max(0.0, (bar.volume - signed) / 2.0) for bar, signed in signed_rows)
+    net_imbalance = signed_volume / total_volume if total_volume > 0 else 0.0
+
+    last_time = _parse_timestamp(valid[-1].timestamp)
+    if last_time:
+        cutoff = last_time - timedelta(minutes=30)
+        recent_rows = [(bar, signed) for bar, signed in signed_rows if (_parse_timestamp(bar.timestamp) or last_time) >= cutoff]
+    else:
+        recent_rows = signed_rows[-30:]
+    recent_volume = sum(bar.volume for bar, _ in recent_rows)
+    recent_imbalance = sum(signed for _, signed in recent_rows) / recent_volume if recent_volume > 0 else 0.0
+
+    bucket_target = max(total_volume / 12.0, 1.0)
+    buckets = []
+    bucket_volume = 0.0
+    bucket_signed = 0.0
+    for bar, signed in signed_rows:
+        bucket_volume += bar.volume
+        bucket_signed += signed
+        if bucket_volume >= bucket_target:
+            buckets.append(abs(bucket_signed) / bucket_volume if bucket_volume > 0 else 0.0)
+            bucket_volume = 0.0
+            bucket_signed = 0.0
+    if bucket_volume > 0:
+        buckets.append(abs(bucket_signed) / bucket_volume)
+    vpin = sum(buckets[-12:]) / len(buckets[-12:]) if buckets else None
+
+    score = 0.0
+    pressure_score = 0.0
+    if net_imbalance >= 0.18:
+        score += 0.75
+        pressure_score += 0.75
+    elif net_imbalance <= -0.18:
+        score -= 0.75
+        pressure_score -= 0.75
+    if recent_imbalance >= 0.22:
+        score += 0.55
+        pressure_score += 0.55
+    elif recent_imbalance <= -0.22:
+        score -= 0.55
+        pressure_score -= 0.55
+    if vpin is not None:
+        if vpin >= 0.55:
+            score -= 0.35
+        elif vpin <= 0.22:
+            score += 0.2
+    if spread_pct is not None:
+        if spread_pct >= 0.006:
+            score -= 0.35
+        elif spread_pct <= 0.0015:
+            score += 0.15
+    score = max(-2.0, min(2.0, score))
+    if pressure_score >= 0.9:
+        label = "主动买盘占优"
+    elif pressure_score >= 0.35:
+        label = "买盘略强"
+    elif pressure_score <= -0.9:
+        label = "主动卖压明显"
+    elif pressure_score <= -0.35:
+        label = "卖压略强"
+    elif score >= 0.25:
+        label = "低冲击中性"
+    elif score <= -0.25:
+        label = "高冲击中性"
+    else:
+        label = "订单流中性"
+    return {
+        "label": label,
+        "score": round(score, 2),
+        "score_range": _score_meta(score, -2, 2),
+        "bar_count": len(valid),
+        "source": "intraday_bar_inferred",
+        "total_volume": round(total_volume, 2),
+        "buy_volume_est": round(buy_volume, 2),
+        "sell_volume_est": round(sell_volume, 2),
+        "net_imbalance": round(net_imbalance, 5),
+        "recent_30m_imbalance": round(recent_imbalance, 5),
+        "pressure_score": round(pressure_score, 2),
+        "pressure_score_range": _score_meta(pressure_score, -1.3, 1.3),
+        "vpin_approx": round(vpin, 5) if vpin is not None else None,
+        "vpin_bucket_count": len(buckets),
+        "spread_pct": round(spread_pct, 5) if spread_pct is not None else None,
+        "bid": round(bid, 4) if bid else None,
+        "ask": round(ask, 4) if ask else None,
+        "detail": "用分钟聚合 bar 的收盘位置和涨跌方向推断买/卖量，VPIN 为成交量桶不平衡近似；不是逐笔交易级 VPIN。",
+    }
+
+
 def _price_volume_analysis(
     symbol: str,
     snapshot: TechnicalSnapshot,
@@ -1757,6 +2008,7 @@ def _price_volume_analysis(
     score = 0.0
     momentum_context = _risk_adjusted_momentum_context(daily_bars, price)
     volatility_context = _range_volatility_context(daily_bars, price, snapshot.atr14)
+    order_flow_context = _order_flow_context(snapshot, intraday_bars)
 
     trend_score = 0.0
     if snapshot.trend_action == "buy":
@@ -1852,6 +2104,18 @@ def _price_volume_analysis(
             "score": round(volume_score, 2),
             "score_range": _score_meta(volume_score, -1.5, 1.5),
             "detail": "20日量比、放量阳/阴线和高量成交区。",
+        }
+    )
+
+    order_flow_score = float(order_flow_context.get("score") or 0.0)
+    score += order_flow_score
+    components.append(
+        {
+            "name": "订单流/VPIN",
+            "score": round(order_flow_score, 2),
+            "score_range": order_flow_context.get("score_range") or _score_meta(order_flow_score, -2, 2),
+            "detail": order_flow_context.get("detail", "分钟聚合订单流推断。"),
+            "metrics": order_flow_context,
         }
     )
 
@@ -1982,6 +2246,7 @@ def _price_volume_analysis(
         "avg_volume20": round(avg_volume20, 2) if avg_volume20 is not None else None,
         "risk_adjusted_momentum": momentum_context,
         "range_volatility": volatility_context,
+        "order_flow": order_flow_context,
         "supports": supports,
         "resistances": resistances,
         "components": components,
@@ -2301,8 +2566,14 @@ def build_trade_plan(
     market_session = _current_market_snapshot_label(datetime.now(timezone.utc).isoformat())
     session = market_session["session"]
     max_quote_age = _effective_quote_age_limit(session, risk)
+    hard_quote_age = _hard_quote_age_limit(risk)
     age_check_enabled = max_quote_age > 0
-    market_session = {**market_session, "effective_max_quote_age_minutes": max_quote_age, "quote_age_block_enabled": age_check_enabled}
+    market_session = {
+        **market_session,
+        "effective_max_quote_age_minutes": max_quote_age,
+        "hard_max_quote_age_minutes": hard_quote_age,
+        "quote_age_block_enabled": age_check_enabled,
+    }
     equity = portfolio.account_equity
     base_weights = {symbol.upper(): float(value) for symbol, value in config.get("base_target_weights", {}).items()}
     target_gross, target_gross_reasons = _apply_target_gross_hint(float(regime["target_gross_exposure"]), portfolio, regime["label"], risk)
@@ -2367,7 +2638,9 @@ def build_trade_plan(
         delta_value = target_value - current_value
         quote_age = snapshot.quote_age_minutes
         stale_close_fallback = str(snapshot.source).startswith("daily_close")
-        quote_stale = stale_close_fallback or (age_check_enabled and quote_age is not None and quote_age > max_quote_age)
+        quote_stale = stale_close_fallback or (
+            quote_age is not None and ((age_check_enabled and quote_age > max_quote_age) or quote_age > hard_quote_age)
+        )
         position = portfolio.positions.get(symbol)
         shares_held = position.shares if position else 0
         bucket = position.bucket if position else "auto"
@@ -2387,7 +2660,8 @@ def build_trade_plan(
         side = None
         value_to_trade = 0.0
         if quote_stale:
-            reasons.append("quote_stale:close_fallback" if stale_close_fallback else f"quote_stale:{quote_age:.1f}m>{max_quote_age:.0f}m@{session}")
+            limit_label = max_quote_age if age_check_enabled else hard_quote_age
+            reasons.append("quote_stale:close_fallback" if stale_close_fallback else f"quote_stale:{quote_age:.1f}m>{limit_label:.0f}m@{session}")
         elif _is_range_trade_overlay(overlay) and current_gross_value <= max_gross_value:
             action = "range_trade"
             if range_trade_target == "flat_required":
@@ -2508,8 +2782,9 @@ def build_trade_plan(
         if str(snapshot.source).startswith("daily_close"):
             data_warnings.append(f"{symbol}: 做T计划跳过，无实时行情，仅有日线收盘兜底价")
             continue
-        if age_check_enabled and quote_age is not None and quote_age > max_quote_age:
-            data_warnings.append(f"{symbol}: 做T计划跳过，行情时间过旧 {quote_age:.1f}m（{session}限{max_quote_age:.0f}m）")
+        if quote_age is not None and ((age_check_enabled and quote_age > max_quote_age) or quote_age > hard_quote_age):
+            limit_label = max_quote_age if age_check_enabled else hard_quote_age
+            data_warnings.append(f"{symbol}: 做T计划跳过，行情时间过旧 {quote_age:.1f}m（{session}限{limit_label:.0f}m）")
             continue
         position = portfolio.positions.get(symbol)
         shares_held = position.shares if position else 0

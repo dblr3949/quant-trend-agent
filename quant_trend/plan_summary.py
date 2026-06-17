@@ -371,7 +371,7 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None, f
         "必须基于输入数据，每只股票一段话；必须覆盖输入positions里的全部symbol。"
         "开头必须先写一段整体市场框架，明确覆盖 SPY、SMH、SOXX、^VIX；缺数据就写缺数据。"
         "每段可以较完整，但要分段清楚；不要因为篇幅省略任何持仓股票。"
-        "优先解释近期量价技术面：支撑、压力、Volume Profile、POC/VAH/VAL/HVN/LVN、筹码占比、VWAP、高量区、20日量比、日内趋势、多周期风险调整动量和区间波动率。"
+        "优先解释近期量价技术面：支撑、压力、Volume Profile、POC/VAH/VAL/HVN/LVN、筹码占比、自动锚定VWAP、高量区、20日量比、日内趋势、多周期风险调整动量、区间波动率和订单流/VPIN近似。"
         "^VIX 必须按 volatility_analysis 里的绝对水平、252日分位、126日Z-score、5日变化和20日均值偏离解释，不要写股票式成交量/POC。"
         "如存在 llm_limit_decisions 或 order.llm_limit_decision，要说明模型选择的候选点位依据。"
         "如存在 order.llm_reference_ladder，只需简短提及有2-3档参考价梯；强调它是参考分层，不是自动下单。"

@@ -1671,6 +1671,44 @@ td select {
   font-weight: 750;
 }
 
+.institutional-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.institutional-metrics div {
+  min-width: 0;
+  border: 1px solid #dce8ee;
+  border-radius: 7px;
+  background: linear-gradient(180deg, #f8fbfc, #ffffff);
+  padding: 7px 8px;
+}
+
+.institutional-metrics span,
+.institutional-metrics strong {
+  display: block;
+  min-width: 0;
+}
+
+.institutional-metrics span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.institutional-metrics strong {
+  margin-top: 3px;
+  overflow: hidden;
+  color: #142838;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
 .market-regime-note {
   margin: 9px 0 0;
   color: var(--muted);
@@ -1837,6 +1875,12 @@ td select {
 
 .axis-tick.level-role-hvn {
   stroke-width: 3.5;
+}
+
+.axis-tick.level-role-anchored_vwap {
+  stroke: #1688a8;
+  stroke-width: 3.4;
+  stroke-dasharray: 7 4;
 }
 
 .axis-ref line {
@@ -2021,6 +2065,12 @@ td select {
   color: #6b7884;
 }
 
+.role-badge.level-role-anchored_vwap {
+  border-color: #bfe4ee;
+  background: #eefaff;
+  color: #136b82;
+}
+
 .metric-badge {
   border: 1px solid #d9e2e8;
   background: #f8fbfd;
@@ -2051,6 +2101,12 @@ td select {
   border-color: #f0c7c7;
   background: #fff1f1;
   color: #a92f2f;
+}
+
+.metric-badge.anchor-context {
+  border-color: #bfe4ee;
+  background: #eefaff;
+  color: #136b82;
 }
 
 .volume-bars {
@@ -2258,6 +2314,18 @@ td select {
   stroke-dasharray: 6 5;
 }
 
+.large-chart .level-line .label-leader {
+  stroke-width: 0.9;
+  stroke-dasharray: 3 3;
+  opacity: 0.65;
+}
+
+.large-chart .level-line .label-bg {
+  fill: rgba(255, 255, 255, 0.88);
+  stroke: #dde6ed;
+  stroke-width: 0.8;
+}
+
 .large-chart .level-line.support line {
   stroke: #16856f;
 }
@@ -2272,10 +2340,32 @@ td select {
   stroke-dasharray: none;
 }
 
+.large-chart .level-line.level-role-poc line {
+  stroke: #b43737;
+  stroke-width: 1.9;
+  stroke-dasharray: none;
+}
+
+.large-chart .level-line.level-role-anchored_vwap line {
+  stroke: #1688a8;
+  stroke-width: 1.7;
+  stroke-dasharray: 10 5;
+}
+
+.large-chart .level-line.level-role-anchored_vwap text {
+  fill: #136b82;
+  font-weight: 800;
+}
+
 .large-chart .level-line text,
 .large-chart .axis-label {
   fill: var(--muted);
   font-size: 11px;
+}
+
+.large-chart .level-line text {
+  text-anchor: end;
+  font-weight: 750;
 }
 
 .large-chart .level-line.current text {

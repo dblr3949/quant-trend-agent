@@ -767,13 +767,13 @@ function renderResearchFlow(process) {
     {
       title: "3. 量价结构主锚",
       status: processStatusBadge("主研究项", "ok"),
-      body: "先找近期支撑/压力，再按成交分布、结构强度、多周期动量和区间波动率排序。买点偏向历史支撑下沿，卖点偏向历史压力/价值区上沿，日内指标只做辅助。",
+      body: "先找近期支撑/压力，再按成交分布、自动锚定VWAP、结构强度、多周期动量、区间波动率和订单流排序。买点偏向历史支撑下沿，卖点偏向历史压力/价值区上沿，日内指标只做辅助。",
       metrics: [
         scoreMetric(scorecard, "price_volume", "近期量价点位"),
         scoreMetric(scorecard, "technical", "趋势/均线"),
         scoreMetric(scorecard, "intraday", "当日分钟线"),
       ],
-      method: "口径：5/10/20/60/90/126日结构、Volume Profile 的 POC/VAH/VAL/HVN/LVN、筹码占比、成交占比、共振、触碰次数、20/60/120日风险调整动量、ATR/Parkinson/Garman-Klass/Yang-Zhang 区间波动率、20日量比、VWAP/近30分钟。",
+      method: "口径：5/10/20/60/90/126日结构、Volume Profile 的 POC/VAH/VAL/HVN/LVN、自动锚定VWAP、筹码占比、成交占比、共振、触碰次数、20/60/120日风险调整动量、ATR/Parkinson/Garman-Klass/Yang-Zhang 区间波动率、订单流/VPIN近似、20日量比、VWAP/近30分钟。",
     },
     {
       title: "4. 仓位与杠杆预算",
@@ -898,6 +898,9 @@ function levelPosition(price, range) {
 function levelMetricText(level) {
   const chips = [];
   if (level.poc_context) chips.push(`${level.poc_context}/${level.poc_side || ""}`);
+  if (level.anchor_date) chips.push(`锚点 ${level.anchor_date}`);
+  if (level.anchor_label) chips.push(`事件 ${level.anchor_label}`);
+  if (level.anchor_volume_ratio20 !== undefined && level.anchor_volume_ratio20 !== null) chips.push(`锚点量比 ${level.anchor_volume_ratio20}`);
   if (level.chip_share_pct !== undefined && level.chip_share_pct !== null) chips.push(`筹码${levelWindowText(level)} ${fmtPct(level.chip_share_pct)}`);
   if (level.level_strength_score !== undefined && level.level_strength_score !== null) chips.push(`力度 ${formatScore(level.level_strength_score, level.level_strength_range, "力度")}`);
   if (level.confluence_count !== undefined && level.confluence_count !== null) chips.push(`共振 ${level.confluence_count}`);
@@ -930,7 +933,7 @@ function levelPriorityScore(level) {
   const tier = String(level?.tier || "");
   const category = String(level?.category || "");
   const tierScore = tier === "近端" ? 2.2 : tier === "主结构" ? 1.25 : tier === "日内辅助" ? 0.2 : tier === "深水/高抛" ? -2.2 : 0;
-  const roleScore = role === "POC" || role === "HVN" ? 0.45 : role === "VAH" || role === "VAL" ? 0.3 : role === "LVN" ? -0.35 : 0;
+  const roleScore = role === "POC" || role === "HVN" ? 0.45 : role === "VAH" || role === "VAL" ? 0.3 : role === "ANCHORED_VWAP" ? 0.35 : role === "LVN" ? -0.35 : 0;
   const categoryScore = category === "volume_profile" ? 0.65 : category === "swing" ? 0.45 : category === "daily_structure" ? 0.25 : category === "intraday" ? -0.25 : 0;
   const deepPenalty = tier === "深水/高抛" && distance > 0.2 ? 2.4 : 0;
   return (
@@ -968,8 +971,10 @@ function levelHelpText(level, key) {
     if (role === "VAH") return "VAH 是价值区上沿，表示主要成交分布的上边界，常作为压力/减仓参考。";
     if (role === "VAL") return "VAL 是价值区下沿，表示主要成交分布的下边界，常作为支撑/买入参考。";
     if (role === "LVN") return "LVN 是低量真空，代表成交稀疏区，穿越可能更快，承接置信度通常低于 POC/HVN。";
+    if (role === "ANCHORED_VWAP") return "AVWAP 是从关键事件日开始累计的成交量加权均价。本系统会自动选择近端高低点、跳空、放量冲击、突破/跌破和摆动点作为锚点。";
     return "该角标表示 Volume Profile 角色。";
   }
+  if (key === "anchor") return "锚定VWAP锚点：自动从窗口高低点、跳空、放量冲击、平台突破/跌破、摆动点中筛选。";
   if (key === "chip") return `筹码占比：按${windowText || "该指标"}窗口的价格箱统计成交量，并把该价附近相邻价格箱合并后占总成交量的比例。`;
   if (key === "volume") return `成交占比：该价格箱自身成交量占${windowText || "该指标"}窗口总成交量的比例。`;
   if (key === "confluence") return "共振：在现价约 0.35% 容差内，其他支撑/压力指标落在同一区域的数量；这是当前候选集合里的横向共振，不是 N 日窗口。";
@@ -990,6 +995,9 @@ function levelMetricBadges(level) {
   if (level.volume_share_pct !== undefined && level.volume_share_pct !== null) badges.push(metricBadge(`成交${levelWindowText(level)}`, fmtPct(level.volume_share_pct), levelHelpText(level, "volume")));
   if (level.confluence_count !== undefined && level.confluence_count !== null) badges.push(metricBadge("共振", level.confluence_count, levelHelpText(level, "confluence")));
   if (level.touch_count !== undefined && level.touch_count !== null) badges.push(metricBadge("触碰126日", level.touch_count, levelHelpText(level, "touch")));
+  if (level.anchor_date) badges.push(metricBadge("锚点", level.anchor_date, levelHelpText(level, "anchor"), "anchor-context"));
+  if (level.anchor_label) badges.push(metricBadge("事件", level.anchor_label, level.anchor_reason || levelHelpText(level, "anchor"), "anchor-context"));
+  if (level.anchor_volume_ratio20 !== undefined && level.anchor_volume_ratio20 !== null) badges.push(metricBadge("锚点量比", level.anchor_volume_ratio20, "锚点当日成交量 / 过去20日均量。", "anchor-context"));
   if (level.tier) badges.push(metricBadge("层级", level.tier, levelHelpText(level, "tier")));
   if (level.poc_context) badges.push(metricBadge("POC", `${level.poc_context}/${level.poc_side || ""}`, levelHelpText(level, "role"), "poc-context"));
   return badges.join("");
@@ -1004,7 +1012,8 @@ function levelRoleClass(level) {
 function levelRoleBadge(level) {
   const role = String(level?.profile_role || "").toUpperCase();
   if (!role) return "";
-  return `<em class="role-badge ${levelRoleClass(level)}" title="${escapeHtml(levelHelpText(level, "role"))}">${escapeHtml(role)}</em>`;
+  const label = role === "ANCHORED_VWAP" ? "AVWAP" : role;
+  return `<em class="role-badge ${levelRoleClass(level)}" title="${escapeHtml(levelHelpText(level, "role"))}">${escapeHtml(label)}</em>`;
 }
 
 function renderLevelMarkers(item) {
@@ -1188,6 +1197,26 @@ function renderComponentExtra(component) {
     `;
   }
   const metrics = component?.metrics || {};
+  if (metrics.net_imbalance !== undefined || metrics.vpin_approx !== undefined || metrics.spread_pct !== undefined) {
+    const items = [
+      ["净失衡", metrics.net_imbalance],
+      ["30分钟", metrics.recent_30m_imbalance],
+      ["VPIN近似", metrics.vpin_approx],
+      ["价差", metrics.spread_pct, "pct"],
+      ["买量估", metrics.buy_volume_est, "money"],
+      ["卖量估", metrics.sell_volume_est, "money"],
+    ].filter(([, value]) => value !== null && value !== undefined);
+    return `
+      <div class="component-extra order-flow-extra">
+        ${items
+          .map(([label, value, type]) => {
+            const shown = type === "pct" ? fmtPct(value) : type === "money" ? fmtMoney(value) : Number(value).toFixed(3).replace(/\.?0+$/, "");
+            return `<span title="${escapeHtml(metrics.detail || "")}">${escapeHtml(label)} ${escapeHtml(shown)}</span>`;
+          })
+          .join("")}
+      </div>
+    `;
+  }
   if (metrics.blended_daily_pct !== undefined || metrics.annualized_pct !== undefined) {
     const items = [
       ["混合日波动", metrics.blended_daily_pct],
@@ -1204,6 +1233,52 @@ function renderComponentExtra(component) {
     `;
   }
   return "";
+}
+
+function renderInstitutionalMetricPanel(item) {
+  const momentum = item?.risk_adjusted_momentum || {};
+  const volatility = item?.range_volatility || {};
+  const flow = item?.order_flow || {};
+  const avwapLevels = [...(item?.supports || []), ...(item?.resistances || [])].filter((level) => String(level.profile_role || "").toUpperCase() === "ANCHORED_VWAP");
+  const latestAnchor = avwapLevels
+    .slice()
+    .sort((a, b) => String(b.anchor_date || "").localeCompare(String(a.anchor_date || "")))[0];
+  const metrics = [
+    {
+      label: "风调动量",
+      value: momentum.score === undefined ? "-" : formatScore(momentum.score, momentum.score_range, "动量"),
+      detail: momentum.detail || "20/60/120日收益除以对应窗口实现波动率。",
+    },
+    {
+      label: "区间波动",
+      value: volatility.blended_daily_pct === undefined ? "-" : `${fmtPct(volatility.blended_daily_pct)} / 年化${fmtPct(volatility.annualized_pct)}`,
+      detail: volatility.detail || "ATR 与区间波动率混合估计。",
+    },
+    {
+      label: "订单流",
+      value: flow.score === undefined ? "-" : `${flow.label || ""} ${formatScore(flow.score, flow.score_range, "订单流")}`,
+      detail: flow.detail || "分钟聚合推断买卖压力与 VPIN 近似。",
+    },
+    {
+      label: "AVWAP",
+      value: avwapLevels.length ? `${avwapLevels.length}条 · ${latestAnchor?.anchor_date || "无日期"}` : "无近端锚线",
+      detail: latestAnchor ? `${latestAnchor.anchor_label || "锚点"}：${latestAnchor.anchor_reason || latestAnchor.source || ""}` : "自动锚定 VWAP 暂无有效支撑/压力。",
+    },
+  ];
+  return `
+    <div class="institutional-metrics">
+      ${metrics
+        .map(
+          (metric) => `
+            <div title="${escapeHtml(metric.detail)}">
+              <span>${escapeHtml(metric.label)}</span>
+              <strong>${escapeHtml(metric.value)}</strong>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function renderTechnicalAnalysis(analysis) {
@@ -1238,6 +1313,7 @@ function renderTechnicalAnalysis(analysis) {
               </div>
               ${renderLevelMarkers(item)}
               ${renderMiniTechChart(item)}
+              ${renderInstitutionalMetricPanel(item)}
               <div class="level-columns">
                 <div>
                   <h4>支撑</h4>
@@ -1313,18 +1389,40 @@ function renderLargePriceVolumeChart(item) {
       `;
     })
     .join("");
-  const lines = [
-    ...sortedLevels(item.supports || []).slice(0, 4).map((level) => ({ ...level, type: "support", label: "支撑" })),
-    ...sortedLevels(item.resistances || []).slice(0, 4).map((level) => ({ ...level, type: "resistance", label: "压力" })),
+  const rawLineItems = [
+    ...sortedLevels(item.supports || []).slice(0, 5).map((level) => ({ ...level, type: "support", label: "支撑" })),
+    ...sortedLevels(item.resistances || []).slice(0, 5).map((level) => ({ ...level, type: "resistance", label: "压力" })),
   ]
+    .map((level) => ({ ...level, y: yFor(level.price) }))
+    .sort((a, b) => a.y - b.y);
+  const minLabelGap = 17;
+  const labelTop = top + 12;
+  const labelBottom = priceBottom - 8;
+  const adjustedLineItems = rawLineItems.map((level) => ({ ...level, labelY: Math.max(labelTop, Math.min(labelBottom, level.y)) }));
+  for (let index = 1; index < adjustedLineItems.length; index += 1) {
+    const previous = adjustedLineItems[index - 1];
+    const current = adjustedLineItems[index];
+    if (current.labelY < previous.labelY + minLabelGap) current.labelY = previous.labelY + minLabelGap;
+  }
+  const overflow = adjustedLineItems.length ? adjustedLineItems[adjustedLineItems.length - 1].labelY - labelBottom : 0;
+  if (overflow > 0) {
+    for (let index = adjustedLineItems.length - 1; index >= 0; index -= 1) {
+      adjustedLineItems[index].labelY = Math.max(labelTop + index * minLabelGap, adjustedLineItems[index].labelY - overflow);
+    }
+  }
+  const lines = adjustedLineItems
     .map((level) => {
-      const y = yFor(level.price);
-      const textY = Math.max(top + 10, Math.min(priceBottom - 4, y - 3));
+      const role = String(level.profile_role || "").toUpperCase();
+      const label = role === "ANCHORED_VWAP" ? "AVWAP" : role === "POC" ? "POC" : level.label;
+      const anchorText = level.anchor_date ? ` · 锚点${level.anchor_date}${level.anchor_label ? `/${level.anchor_label}` : ""}` : "";
+      const shortText = `${label} ${fmtPrice(level.price)}`;
       return `
-        <g class="level-line ${level.type}">
-          <line x1="${left}" y1="${y.toFixed(1)}" x2="${right}" y2="${y.toFixed(1)}"></line>
-          <text x="${right + 8}" y="${textY.toFixed(1)}">${escapeHtml(level.label)} ${fmtPrice(level.price)}</text>
-          <title>${escapeHtml(`${level.label} ${fmtPrice(level.price)} · ${level.source || ""} · ${fmtPct(level.distance_pct)}`)}</title>
+        <g class="level-line ${level.type} ${levelRoleClass(level)}">
+          <line x1="${left}" y1="${level.y.toFixed(1)}" x2="${right}" y2="${level.y.toFixed(1)}"></line>
+          <line class="label-leader" x1="${right - 72}" y1="${level.y.toFixed(1)}" x2="${right - 104}" y2="${level.labelY.toFixed(1)}"></line>
+          <rect class="label-bg" x="${right - 166}" y="${(level.labelY - 13).toFixed(1)}" width="160" height="17" rx="4"></rect>
+          <text x="${right - 10}" y="${level.labelY.toFixed(1)}">${escapeHtml(shortText)}</text>
+          <title>${escapeHtml(`${shortText} · ${level.source || ""}${anchorText} · ${fmtPct(level.distance_pct)}`)}</title>
         </g>
       `;
     })
@@ -1364,6 +1462,7 @@ function renderTechModal(symbol) {
     .join("");
   $("techModalBody").innerHTML = `
     ${renderLargePriceVolumeChart(item)}
+    ${renderInstitutionalMetricPanel(item)}
     <div class="tech-modal-grid">
       <section>
         <h3>关键支撑</h3>

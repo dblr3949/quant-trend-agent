@@ -4,7 +4,17 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from quant_trend.agent import DEFAULT_CONFIG, TechnicalSnapshot, _display_levels, _limit_price, build_snapshot, build_trade_plan, summarize_intraday_bars
+from quant_trend.agent import (
+    DEFAULT_CONFIG,
+    TechnicalSnapshot,
+    _anchored_vwap_levels_from_daily,
+    _daily_anchor_candidates,
+    _display_levels,
+    _limit_price,
+    build_snapshot,
+    build_trade_plan,
+    summarize_intraday_bars,
+)
 from quant_trend.market_data import IntradayBar, Quote
 from quant_trend.models import Bar
 from quant_trend.portfolio import Portfolio, Position
@@ -92,6 +102,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("resistances", plan["technical_analysis"]["MU"])
             self.assertIn("risk_adjusted_momentum", plan["technical_analysis"]["MU"])
             self.assertIn("range_volatility", plan["technical_analysis"]["MU"])
+            self.assertIn("order_flow", plan["technical_analysis"]["MU"])
             self.assertIn("SPY", plan["market_technical_analysis"])
             self.assertNotIn("^VIX", plan["market_technical_analysis"])
             self.assertIn("^VIX", plan["volatility_analysis"])
@@ -107,6 +118,32 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(any("level_strength_score" in level for level in displayed_levels))
             self.assertTrue(any(level.get("profile_role") for level in displayed_levels))
             self.assertTrue(any(order["limit_context"].get("candidate_levels") for order in plan["orders"]))
+
+    def test_anchored_vwap_detects_event_anchors(self):
+        bars = []
+        start = date(2026, 1, 1)
+        price = 100.0
+        for i in range(45):
+            volume = 1_000_000
+            open_price = price * 0.995
+            close = price * 1.002
+            if i == 30:
+                open_price = price * 1.06
+                close = open_price * 1.06
+                volume = 2_600_000
+            high = max(open_price, close) * 1.01
+            low = min(open_price, close) * 0.99
+            bars.append(Bar(start + timedelta(days=i), open_price, high, low, close, volume))
+            price = close
+
+        anchors = _daily_anchor_candidates(bars)
+        anchor_types = {item["type"] for item in anchors}
+        self.assertIn("gap_up", anchor_types)
+        self.assertIn("volume_shock_up", anchor_types)
+
+        levels = _anchored_vwap_levels_from_daily(bars, "buy", 200)
+        self.assertTrue(any(level.get("profile_role") == "anchored_vwap" for level in levels))
+        self.assertTrue(any(level.get("anchor_date") for level in levels))
 
     def test_stale_quotes_block_add_orders(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,6 +300,8 @@ class AgentTests(unittest.TestCase):
             price=100,
             source="test",
             quote_age_minutes=0,
+            bid=None,
+            ask=None,
             close=99,
             sma20=98,
             sma50=96,
@@ -314,6 +353,8 @@ class AgentTests(unittest.TestCase):
             price=100,
             source="test",
             quote_age_minutes=0,
+            bid=None,
+            ask=None,
             close=99,
             sma20=99.6,
             sma50=96,
