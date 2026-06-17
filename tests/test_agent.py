@@ -140,6 +140,31 @@ class AgentTests(unittest.TestCase):
             self.assertIn("NVDA", {item["symbol"] for item in plan["positions"]})
             self.assertTrue([order for order in plan["orders"] if order["symbol"] == "NVDA" and order["side"] == "buy"])
 
+    def test_prompt_build_position_creates_patient_buy_even_when_trend_sell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = {}
+            for symbol, price, drift in [
+                ("NVDA", 150, -0.004),
+                ("SPY", 500, 0.004),
+                ("SMH", 250, 0.004),
+                ("SOXX", 220, 0.004),
+                ("^VIX", 16, 0.0),
+            ]:
+                latest[symbol] = write_bars(tmp, symbol, price, drift=drift)
+            asof = datetime.now(timezone.utc).isoformat()
+            quotes = {symbol: Quote(symbol, price, asof=asof, source="test") for symbol, price in latest.items()}
+            portfolio = Portfolio(account_equity=100000, cash=100000, positions={})
+            research = overlay_from_prompt("我想建仓NVDA", ["NVDA"])
+
+            plan = build_trade_plan(portfolio, quotes, DEFAULT_CONFIG, research, tmp)
+            position = next(item for item in plan["positions"] if item["symbol"] == "NVDA")
+            orders = [order for order in plan["orders"] if order["symbol"] == "NVDA" and order["side"] == "buy"]
+
+            self.assertEqual(position["trend_action"], "sell")
+            self.assertIn("prompt_add_patient_entry_overrides_trend_sell", position["reason"])
+            self.assertTrue(orders)
+            self.assertLess(orders[0]["limit_price"], position["price"])
+
     def test_anchored_vwap_detects_event_anchors(self):
         bars = []
         start = date(2026, 1, 1)

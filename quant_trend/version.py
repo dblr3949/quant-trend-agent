@@ -1,7 +1,7 @@
 import os
 
 
-APP_VERSION = os.getenv("APP_VERSION", "0.5.0")
+APP_VERSION = os.getenv("APP_VERSION", "0.5.1")
 APP_RELEASE_DATE = "2026-06-17"
 APP_BUILD = (
     os.getenv("RAILWAY_GIT_COMMIT_SHA")

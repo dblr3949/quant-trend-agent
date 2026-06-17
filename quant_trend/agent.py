@@ -829,6 +829,19 @@ def _symbol_overlay(research: dict, symbol: str) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+def _explicit_prompt_add_intent(overlay: dict) -> bool:
+    flags = {str(flag).strip().lower() for flag in overlay.get("prompt_flags", []) if str(flag).strip()}
+    if flags & {"symbol_positive", "llm_positive", "prompt_positive", "buy_intent", "add_intent", "build_position"}:
+        return True
+    if any(token in flag for flag in flags for token in ("positive", "buy", "add", "建仓", "买入")):
+        return True
+    try:
+        bias = float(overlay.get("bias") or 0.0)
+    except (TypeError, ValueError):
+        bias = 0.0
+    return bias > 0 and any(overlay.get(key) for key in ("buy_condition", "explanation", "evidence"))
+
+
 def _bucket_multiplier(bucket: str, is_core_symbol: bool) -> tuple[float, list[str]]:
     normalized = (bucket or "auto").lower()
     if normalized == "auto":
@@ -2662,6 +2675,7 @@ def build_trade_plan(
         portfolio_soft_no_add = trade_constraint in {"soft_no_add", "reduce_only"}
         portfolio_soft_no_reduce = trade_constraint in {"soft_no_reduce", "prefer_hold"}
         research_bias = _bias_from_research(research, symbol)
+        explicit_prompt_add = _explicit_prompt_add_intent(overlay)
         intraday_summary = intraday_summaries.get(symbol)
         range_trade_target = _range_trade_target(overlay) if _is_range_trade_overlay(overlay) else "flexible"
 
@@ -2685,7 +2699,9 @@ def build_trade_plan(
             value_to_trade = min(delta_value, remaining_buy_value)
             if no_add:
                 reasons.append("prompt_no_add")
-            elif value_to_trade >= threshold_value and snapshot.trend_action != "sell":
+            elif value_to_trade >= threshold_value and (snapshot.trend_action != "sell" or explicit_prompt_add):
+                if snapshot.trend_action == "sell" and explicit_prompt_add:
+                    reasons.append("prompt_add_patient_entry_overrides_trend_sell")
                 if soft_no_add or portfolio_soft_no_add:
                     evidence = _soft_no_add_evidence(snapshot, regime, intraday_summary, research_bias)
                     if evidence < 3.0:
