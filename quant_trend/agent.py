@@ -1258,7 +1258,7 @@ def _local_minima_bins(profile: dict, limit: int = 3) -> list[dict]:
 
 
 def _volume_profile_levels_from_daily(bars: list[Bar], side: str, reference_price: float) -> list[dict]:
-    profiles = [profile for window in (20, 60, 90, 126) if (profile := _volume_profile(bars, window))]
+    profiles = [profile for window in (20, 60, 90, 126, 180, 252) if (profile := _volume_profile(bars, window))]
     levels: list[dict] = []
     for profile in profiles:
         window = int(profile["window"])
@@ -1306,7 +1306,7 @@ def _swing_levels_for_window(bars: list[Bar], side: str, reference_price: float,
 
 def _swing_levels_from_daily(bars: list[Bar], side: str, reference_price: float) -> list[dict]:
     levels: list[dict] = []
-    for window in (20, 60, 90, 126):
+    for window in (20, 60, 90, 126, 180, 252):
         levels.extend(_swing_levels_for_window(bars, side, reference_price, window))
     return levels
 
@@ -1359,7 +1359,7 @@ def _daily_anchor_candidates(bars: list[Bar]) -> list[dict]:
             }
         )
 
-    for window in (20, 60, 90, 126):
+    for window in (20, 60, 90, 126, 180, 252):
         recent = valid[-window:]
         if len(recent) < max(10, window // 3):
             continue
@@ -1369,7 +1369,7 @@ def _daily_anchor_candidates(bars: list[Bar]) -> list[dict]:
         add(low_index, "window_low", window, f"近{window}日低点锚定")
         add(high_index, "window_high", window, f"近{window}日高点锚定")
 
-    for index in range(max(1, len(valid) - 126), len(valid)):
+    for index in range(max(1, len(valid) - 252), len(valid)):
         bar = valid[index]
         prev = valid[index - 1]
         recent20 = valid[max(0, index - 20) : index]
@@ -1397,7 +1397,7 @@ def _daily_anchor_candidates(bars: list[Bar]) -> list[dict]:
         if abs(day_return) >= 0.08 and volume_ratio >= 1.5:
             add(index, "earnings_like_shock", None, "大幅波动叠加放量，近似财报/重大消息冲击锚")
 
-    for index in range(max(2, len(valid) - 90), len(valid) - 2):
+    for index in range(max(2, len(valid) - 180), len(valid) - 2):
         window = valid[index - 2 : index + 3]
         bar = valid[index]
         if bar.low == min(item.low for item in window):
@@ -1488,7 +1488,7 @@ def _limit_levels(
     price = snapshot.price
     levels: list[dict] = []
 
-    for window in (5, 10, 20, 50, 63, 90, 126):
+    for window in (5, 10, 20, 50, 63, 90, 126, 180, 252):
         recent = daily_bars[-window:]
         if len(recent) < min(window, 5):
             continue
@@ -1554,7 +1554,7 @@ def _level_weight(level: dict) -> float:
         "volume_void": 1.2,
         "intraday": 0.8,
     }.get(category, 1.0)
-    if "90日" in source or "126日" in source or "63日" in source:
+    if "90日" in source or "126日" in source or "180日" in source or "252日" in source or "63日" in source:
         weight += 0.6
     if "20日" in source or "50日" in source:
         weight += 0.25
@@ -1589,7 +1589,7 @@ def _touch_stats_for_level(level: dict, bars: list[Bar], reference_price: float)
         return int(level.get("touch_count") or 0), level.get("recency_days") if isinstance(level.get("recency_days"), int) else None
     price = float(level.get("price") or 0.0)
     tolerance = max(reference_price * 0.0035, 0.08)
-    touched = [bar for bar in bars[-126:] if bar.low - tolerance <= price <= bar.high + tolerance]
+    touched = [bar for bar in bars[-252:] if bar.low - tolerance <= price <= bar.high + tolerance]
     if not touched:
         raw_recency = level.get("recency_days")
         return int(level.get("touch_count") or 0), raw_recency if isinstance(raw_recency, int) else None
@@ -1990,12 +1990,12 @@ def _price_volume_analysis(
     intraday_bars: list[IntradayBar],
 ) -> dict:
     price = float(snapshot.price)
-    recent = daily_bars[-63:]
+    recent = daily_bars[-126:]
     recent20 = daily_bars[-20:]
     support_levels = _enrich_levels(_dedupe_levels(_limit_levels("buy", snapshot, daily_bars, intraday_summary, intraday_bars), price), price, daily_bars)
     resistance_levels = _enrich_levels(_dedupe_levels(_limit_levels("sell", snapshot, daily_bars, intraday_summary, intraday_bars), price), price, daily_bars)
-    supports = _display_levels(support_levels, "buy", price, 8)
-    resistances = _display_levels(resistance_levels, "sell", price, 8)
+    supports = _display_levels(support_levels, "buy", price, 12)
+    resistances = _display_levels(resistance_levels, "sell", price, 12)
 
     low = min((bar.low for bar in recent), default=price)
     high = max((bar.high for bar in recent), default=price)
@@ -2080,7 +2080,7 @@ def _price_volume_analysis(
             "name": "支撑/压力",
             "score": round(structure_score, 2),
             "score_range": _score_meta(structure_score, -2.0, 2.0),
-            "detail": "近5/10/20日高低、均线、VWAP和高量区的近端位置。",
+            "detail": "近5/10/20/50/63/90/126/180/252日结构、均线、VWAP和高量区的近端位置。",
         }
     )
 
@@ -2134,8 +2134,8 @@ def _price_volume_analysis(
 
     score = round(max(-6.0, min(6.0, score)), 2)
     chart_prices = [price, low, high]
-    chart_prices.extend(level["price"] for level in supports[:4])
-    chart_prices.extend(level["price"] for level in resistances[:4])
+    chart_prices.extend(level["price"] for level in supports[:6])
+    chart_prices.extend(level["price"] for level in resistances[:6])
     chart_low = min(chart_prices) if chart_prices else price
     chart_high = max(chart_prices) if chart_prices else price
     if chart_high <= chart_low:
@@ -2144,7 +2144,7 @@ def _price_volume_analysis(
     pad = max(price * 0.005, (chart_high - chart_low) * 0.08)
 
     recent_volume = []
-    for bar in daily_bars[-12:]:
+    for bar in daily_bars[-30:]:
         recent_volume.append(
             {
                 "date": bar.date.isoformat(),
@@ -2155,7 +2155,7 @@ def _price_volume_analysis(
             }
         )
     recent_bars = []
-    for bar in daily_bars[-60:]:
+    for bar in daily_bars[-180:]:
         recent_bars.append(
             {
                 "date": bar.date.isoformat(),
@@ -2198,7 +2198,7 @@ def _price_volume_analysis(
                 "is_complete_daily": False,
             }
         )
-    recent_volume = recent_volume[-13:]
+    recent_volume = recent_volume[-31:]
     if append_current:
         recent_bars.append(
             {
@@ -2218,7 +2218,7 @@ def _price_volume_analysis(
                 "is_complete_daily": False,
             }
         )
-    recent_bars = recent_bars[-61:]
+    recent_bars = recent_bars[-181:]
 
     explanation_parts = []
     if nearest_support:
@@ -2650,6 +2650,7 @@ def build_trade_plan(
         no_add = bool(overlay.get("no_add"))
         soft_no_add = bool(overlay.get("soft_no_add"))
         no_reduce = bool(overlay.get("no_reduce"))
+        soft_no_reduce = bool(overlay.get("soft_no_reduce"))
         portfolio_soft_no_add = trade_constraint in {"soft_no_add", "reduce_only"}
         portfolio_soft_no_reduce = trade_constraint in {"soft_no_reduce", "prefer_hold"}
         research_bias = _bias_from_research(research, symbol)
@@ -2696,13 +2697,15 @@ def build_trade_plan(
             value_to_trade = abs(delta_value)
             if no_reduce:
                 reasons.append("prompt_no_reduce")
-            elif portfolio_soft_no_reduce:
+            elif soft_no_reduce or portfolio_soft_no_reduce:
                 evidence = _soft_reduce_evidence(snapshot, regime, intraday_summary, research_bias, current_value / equity if equity else 0.0, target_weight)
                 if evidence < 3.0:
-                    reasons.append(f"constraint_soft_no_reduce:{evidence:+.1f}")
+                    label = "prompt_soft_no_reduce" if soft_no_reduce else "constraint_soft_no_reduce"
+                    reasons.append(f"{label}:{evidence:+.1f}")
                     value_to_trade = 0.0
                 elif shares_held > 0:
-                    reasons.append(f"constraint_soft_no_reduce_overridden:{evidence:+.1f}")
+                    label = "prompt_soft_no_reduce_overridden" if soft_no_reduce else "constraint_soft_no_reduce_overridden"
+                    reasons.append(f"{label}:{evidence:+.1f}")
                     action = "reduce"
                     side = "sell"
                 else:

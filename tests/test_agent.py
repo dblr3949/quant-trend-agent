@@ -222,6 +222,28 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(research["symbols"]["INTC"].get("no_add", False))
         self.assertLessEqual(research["symbols"]["INTC"]["bias"], 0)
 
+    def test_prompt_soft_no_reduce_blocks_ordinary_reduce(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = write_bars(tmp, "MU", 100)
+            for symbol, price in {"SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
+                write_bars(tmp, symbol, price)
+            asof = datetime.now(timezone.utc).isoformat()
+            quotes = {
+                "MU": Quote("MU", latest, asof=asof, source="test"),
+                "SPY": Quote("SPY", 700, asof=asof, source="test"),
+                "SMH": Quote("SMH", 350, asof=asof, source="test"),
+                "SOXX": Quote("SOXX", 300, asof=asof, source="test"),
+                "^VIX": Quote("^VIX", 16, asof=asof, source="test"),
+            }
+            portfolio = Portfolio(account_equity=100000, cash=-150000, positions={"MU": Position("MU", 1000, 100)})
+            config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 0.05}}
+            research = {"symbols": {"MU": {"soft_no_reduce": True, "bias": 1.0}}}
+
+            plan = build_trade_plan(portfolio, quotes, config, research, tmp)
+
+            self.assertFalse([order for order in plan["orders"] if order["symbol"] == "MU" and order["side"] == "sell"])
+            self.assertIn("prompt_soft_no_reduce", plan["positions"][0]["reason"])
+
     def test_prompt_range_trade_creates_soft_flat_buy_and_sell_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             latest = write_bars(tmp, "MU", 100)

@@ -30,7 +30,7 @@ from .market_data import (
 from .portfolio import Portfolio, Position, portfolio_from_dict, portfolio_to_dict, save_portfolio
 from .portfolio_input import portfolio_from_text
 from .plan_summary import build_executive_summary
-from .prompt_overlay import merge_research_overlays, overlay_from_prompt
+from .prompt_overlay import merge_research_overlays, overlay_from_prompt_with_llm
 from .user_store import SESSION_DAYS, UserStore, auth_mode_enabled
 
 try:
@@ -99,7 +99,9 @@ def _now_iso() -> str:
 
 def _collect_llm_usage(plan: dict) -> dict:
     calls = []
+    prompt_parser = ((plan.get("research_overlay") or {}).get("prompt_parser") or {}) if isinstance(plan.get("research_overlay"), dict) else {}
     for name, payload in [
+        ("prompt_parser", prompt_parser),
         ("limit_decision", plan.get("llm_limit_decisions") or {}),
         ("executive_summary", plan.get("executive_summary") or {}),
     ]:
@@ -709,7 +711,7 @@ class AgentApp:
                 source_name = "Yahoo 当日分钟线兜底"
             sources.append({"name": source_name, "type": "intraday", "usage": "用于开盘至今、VWAP、近 30 分钟趋势和日内区间评分。"})
         if prompt.strip():
-            sources.append({"name": "本次自然语言 prompt", "type": "manual_prompt", "usage": "解析为软/硬约束、宏观谨慎偏置和个股偏置。"})
+            sources.append({"name": "本次自然语言 prompt", "type": "manual_prompt", "usage": "优先用 LLM 解析为软/硬约束、条件、做T意图和个股偏置；规则解析作为硬约束护栏和失败兜底。"})
         if self.research_path.exists():
             sources.append({"name": "data/research_overlay.json", "type": "manual_research_overlay", "usage": "本地研究/事件弱覆盖层；数据源未自动化前，只作为辅助偏置，不作为主因。"})
         if provider == "ibkr":
@@ -812,9 +814,18 @@ class AgentApp:
                 else:
                     intraday_warnings.append("当日分钟线已关闭")
 
-                self._progress_step("解析本次想法", "把自然语言 prompt 合并进研究覆盖层；普通限制是软约束，明确禁止才硬拦。", {"prompt长度": len(prompt)})
+                self._progress_step("解析本次想法", "用 LLM+规则护栏解析自然语言 prompt；普通限制是软约束，明确禁止才硬拦。", {"prompt长度": len(prompt)})
                 base_research = load_json(self.research_path)
-                prompt_research = overlay_from_prompt(prompt, symbols)
+                prompt_research = overlay_from_prompt_with_llm(prompt, symbols, model=llm_model)
+                parser_meta = prompt_research.get("prompt_parser", {}) if isinstance(prompt_research, dict) else {}
+                self._progress_step(
+                    "本次想法解析完成",
+                    "解析结果已合并为 prompt_overlay；LLM 不可删除规则识别出的硬约束。",
+                    {
+                        "解析器": parser_meta.get("source", "rules"),
+                        "解析标的": parser_meta.get("symbols_parsed", len((prompt_research.get("symbols") or {}) if isinstance(prompt_research, dict) else {})),
+                    },
+                )
                 research = merge_research_overlays(base_research, prompt_research)
 
                 self._progress_step("计算建议", "以近期量价点位为主轴，综合市场环境、当日分钟线、prompt 约束和仓位风险。", {"状态": "开始"})
