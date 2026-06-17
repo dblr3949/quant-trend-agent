@@ -1,6 +1,6 @@
 # Semis Position Agent
 
-当前版本：`v0.4.0`
+当前版本：`v0.5.0`
 
 半导体持仓调仓研究台。系统读取网页里手动维护的 BBAE 持仓、Massive/Polygon 行情、历史日线、当日分钟线、用户本轮调仓 prompt 和本地研究覆盖项，生成中文研究过程、重点总结和人工确认用的挂单建议。
 
@@ -73,7 +73,7 @@ https://quant-trend-agent-production.up.railway.app
 
 版本号定义在 `quant_trend/version.py`。
 
-前端 topbar 会展示当前应用版本，例如 `v0.4.0`。后端接口也会返回版本：
+前端 topbar 会展示当前应用版本，例如 `v0.5.0`。后端接口也会返回版本：
 
 ```bash
 curl https://quant-trend-agent-production.up.railway.app/healthz
@@ -160,9 +160,17 @@ LLM 解析 + 规则护栏 + 规则兜底
 
 股票池来自三部分并集：
 
-- `config/agent_config.json` 里的默认持仓标的
 - 当前网页持仓里的 symbol
+- 本轮 prompt 或 `data/research_overlay.json` 明确提到的 symbol
 - 市场代理：`SPY / SMH / SOXX / ^VIX`
+
+`config/agent_config.json` 里的 `symbols` 和 `base_target_weights` 是默认偏好和权重参考，不会自动给每个用户生成未持仓标的的调仓计划。默认配置：
+
+```json
+"include_config_symbols_by_default": false
+```
+
+所以另一个账号如果没有 INTC/MRVL，就不会因为全局配置里有 INTC/MRVL 而自动收到建仓建议。若本轮 prompt 写“想加仓 NVDA”，系统会从 prompt 抽取 `NVDA`，拉取 NVDA 行情和日线，并把它加入本轮交易宇宙。
 
 ### 2. 补齐历史日线
 
@@ -558,7 +566,7 @@ MASSIVE_API_KEY=...
 DASHSCOPE_API_KEY=...
 OPENAI_API_KEY=...
 DEEPSEEK_API_KEY=...
-APP_VERSION=0.4.0
+APP_VERSION=0.5.0
 ```
 
 如果启用多用户数据库，持仓、设置、跑批记录会写入 `/data` 下的持久化数据库或文件。Railway 重新部署不会清空 `/data` volume。

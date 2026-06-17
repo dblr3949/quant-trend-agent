@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quant_trend.agent import _current_market_snapshot_label
-from quant_trend.app_server import DEFAULT_SETTINGS, AgentApp, _latest_expected_us_daily_date
+from quant_trend.app_server import DEFAULT_SETTINGS, AgentApp, _latest_expected_us_daily_date, _symbols_for_run
 from quant_trend.market_data import Quote
+from quant_trend.portfolio import Portfolio, Position
 from quant_trend.user_store import UserStore
 
 
@@ -87,6 +88,23 @@ class AppServerTests(unittest.TestCase):
 
         self.assertEqual(quotes["MU"].source, "massive:test")
         fallback.assert_not_called()
+
+    def test_symbols_for_run_uses_holdings_and_prompt_not_default_watchlist(self):
+        config = {
+            "symbols": ["MU", "INTC", "MRVL"],
+            "base_target_weights": {"MU": 0.42, "INTC": 0.14, "MRVL": 0.3},
+            "market_proxies": ["SPY", "SMH", "SOXX", "^VIX"],
+            "include_config_symbols_by_default": False,
+        }
+        portfolio = Portfolio(account_equity=100000, cash=100000, positions={"MU": Position("MU", 10, 100)})
+
+        symbols = _symbols_for_run(config, portfolio, prompt_symbols={"NVDA"})
+
+        self.assertIn("MU", symbols)
+        self.assertIn("NVDA", symbols)
+        self.assertIn("SPY", symbols)
+        self.assertNotIn("INTC", symbols)
+        self.assertNotIn("MRVL", symbols)
 
     def test_refresh_history_updates_stale_csv(self):
         with tempfile.TemporaryDirectory() as tmp:

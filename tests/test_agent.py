@@ -95,7 +95,7 @@ class AgentTests(unittest.TestCase):
             plan = build_trade_plan(portfolio, quotes, DEFAULT_CONFIG, {}, tmp)
 
             self.assertIn(plan["regime"]["label"], {"risk_on", "neutral"})
-            self.assertGreaterEqual(len(plan["positions"]), 5)
+            self.assertEqual({item["symbol"] for item in plan["positions"]}, {"MU", "MRVL"})
             self.assertTrue(all(order["shares"] > 0 and order["limit_price"] > 0 for order in plan["orders"]))
             self.assertIn("MU", plan["technical_analysis"])
             self.assertIn("supports", plan["technical_analysis"]["MU"])
@@ -118,6 +118,27 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(any("level_strength_score" in level for level in displayed_levels))
             self.assertTrue(any(level.get("profile_role") for level in displayed_levels))
             self.assertTrue(any(order["limit_context"].get("candidate_levels") for order in plan["orders"]))
+
+    def test_research_prompt_symbol_can_create_new_position_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = {}
+            for symbol, price in {"NVDA": 150, "SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
+                latest[symbol] = write_bars(tmp, symbol, price)
+            asof = datetime.now(timezone.utc).isoformat()
+            quotes = {
+                "NVDA": Quote("NVDA", latest["NVDA"], asof=asof, source="test"),
+                "SPY": Quote("SPY", latest["SPY"], asof=asof, source="test"),
+                "SMH": Quote("SMH", latest["SMH"], asof=asof, source="test"),
+                "SOXX": Quote("SOXX", latest["SOXX"], asof=asof, source="test"),
+                "^VIX": Quote("^VIX", latest["^VIX"], asof=asof, source="test"),
+            }
+            portfolio = Portfolio(account_equity=100000, cash=100000, positions={})
+            research = {"symbols": {"NVDA": {"bias": 1.0, "prompt_flags": ["symbol_positive"]}}}
+
+            plan = build_trade_plan(portfolio, quotes, DEFAULT_CONFIG, research, tmp)
+
+            self.assertIn("NVDA", {item["symbol"] for item in plan["positions"]})
+            self.assertTrue([order for order in plan["orders"] if order["symbol"] == "NVDA" and order["side"] == "buy"])
 
     def test_anchored_vwap_detects_event_anchors(self):
         bars = []
@@ -159,8 +180,9 @@ class AgentTests(unittest.TestCase):
             }
             portfolio = Portfolio(account_equity=100000, cash=100000, positions={})
             config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
+            research = {"symbols": {"MU": {"prompt_flags": ["explicit_test_symbol"]}}}
 
-            plan = build_trade_plan(portfolio, quotes, config, {}, tmp)
+            plan = build_trade_plan(portfolio, quotes, config, research, tmp)
 
             self.assertEqual(plan["orders"], [])
             self.assertIn("quote_stale", plan["positions"][0]["reason"])
@@ -361,8 +383,9 @@ class AgentTests(unittest.TestCase):
             }
             portfolio = Portfolio(account_equity=100000, cash=100000, maintenance_margin=80000, positions={})
             config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
+            research = {"symbols": {"MU": {"prompt_flags": ["explicit_test_symbol"]}}}
 
-            plan = build_trade_plan(portfolio, quotes, config, {}, tmp)
+            plan = build_trade_plan(portfolio, quotes, config, research, tmp)
 
             self.assertEqual(plan["orders"], [])
             self.assertEqual(plan["portfolio"]["margin_buy_budget"], 0.0)

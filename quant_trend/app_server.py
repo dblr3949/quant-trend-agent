@@ -30,7 +30,7 @@ from .market_data import (
 from .portfolio import Portfolio, Position, portfolio_from_dict, portfolio_to_dict, save_portfolio
 from .portfolio_input import portfolio_from_text
 from .plan_summary import build_executive_summary
-from .prompt_overlay import merge_research_overlays, overlay_from_prompt_with_llm
+from .prompt_overlay import extract_prompt_symbols, merge_research_overlays, overlay_from_prompt_with_llm
 from .user_store import SESSION_DAYS, UserStore, auth_mode_enabled
 from .version import app_version_payload
 
@@ -144,11 +144,15 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
-def _symbols_for_run(config: dict, portfolio: Portfolio) -> list[str]:
-    symbols = set(symbol.upper() for symbol in config.get("symbols", []))
-    symbols.update(symbol.upper() for symbol in config.get("base_target_weights", {}))
+def _symbols_for_run(config: dict, portfolio: Portfolio, prompt_symbols: set[str] | None = None, research: dict | None = None) -> list[str]:
+    symbols = {symbol.upper() for symbol in portfolio.positions}
+    symbols.update(symbol.upper() for symbol in (prompt_symbols or set()))
+    if research:
+        symbols.update(str(symbol).upper() for symbol in (research.get("symbols") or {}) if str(symbol or "").strip())
+    if config.get("include_config_symbols_by_default", False):
+        symbols.update(symbol.upper() for symbol in config.get("symbols", []))
+        symbols.update(symbol.upper() for symbol in config.get("base_target_weights", {}))
     symbols.update(symbol.upper() for symbol in config.get("market_proxies", []))
-    symbols.update(portfolio.positions)
     return sorted(symbols)
 
 
@@ -780,10 +784,12 @@ class AgentApp:
                     raise ValueError("Missing portfolio. Save positions first.")
                 portfolio = portfolio_from_dict(portfolio_payload)
                 config = load_agent_config(self.config_path)
-                symbols = _symbols_for_run(config, portfolio)
                 settings = {**state.get("settings", {}), **payload.get("settings", {})}
                 provider = payload.get("provider") or settings.get("provider", "massive")
                 llm_model = str(payload.get("model") or settings.get("llm_model") or "").strip() or None
+                base_research = load_json(self.research_path)
+                prompt_symbols = extract_prompt_symbols(prompt)
+                symbols = _symbols_for_run(config, portfolio, prompt_symbols=prompt_symbols, research=base_research)
                 self._progress_step("确认股票池", f"本轮覆盖 {len(symbols)} 个标的：{', '.join(symbols)}。", {"标的数": len(symbols)})
 
                 history_source = "Massive/Polygon" if provider == "massive" else "Yahoo Chart"
@@ -816,7 +822,6 @@ class AgentApp:
                     intraday_warnings.append("当日分钟线已关闭")
 
                 self._progress_step("解析本次想法", "用 LLM+规则护栏解析自然语言 prompt；普通限制是软约束，明确禁止才硬拦。", {"prompt长度": len(prompt)})
-                base_research = load_json(self.research_path)
                 prompt_research = overlay_from_prompt_with_llm(prompt, symbols, model=llm_model)
                 parser_meta = prompt_research.get("prompt_parser", {}) if isinstance(prompt_research, dict) else {}
                 self._progress_step(

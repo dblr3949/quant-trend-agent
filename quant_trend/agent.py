@@ -41,6 +41,7 @@ class TechnicalSnapshot:
 
 DEFAULT_CONFIG = {
     "symbols": ["MU", "AAOI", "INTC", "LITE", "MRVL"],
+    "include_config_symbols_by_default": False,
     "market_proxies": ["SPY", "SMH", "SOXX", "^VIX"],
     "base_target_weights": {
         "MU": 0.42,
@@ -2510,9 +2511,16 @@ def build_trade_plan(
     config = config or DEFAULT_CONFIG
     research = research or {}
 
-    symbols = set(symbol.upper() for symbol in config.get("symbols", []))
-    symbols.update(portfolio.positions)
-    symbols.update(symbol.upper() for symbol in config.get("base_target_weights", {}))
+    symbols = {symbol.upper() for symbol in portfolio.positions}
+    research_symbols = {
+        str(symbol).upper()
+        for symbol in (research.get("symbols") or {})
+        if str(symbol or "").strip()
+    }
+    symbols.update(research_symbols)
+    if config.get("include_config_symbols_by_default", False):
+        symbols.update(symbol.upper() for symbol in config.get("symbols", []))
+        symbols.update(symbol.upper() for symbol in config.get("base_target_weights", {}))
     proxies = set(symbol.upper() for symbol in config.get("market_proxies", []))
     all_symbols = sorted(symbols | proxies)
 

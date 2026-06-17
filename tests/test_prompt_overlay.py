@@ -1,10 +1,30 @@
 import unittest
 from unittest.mock import patch
 
-from quant_trend.prompt_overlay import overlay_from_prompt_with_llm
+from quant_trend.prompt_overlay import extract_prompt_symbols, overlay_from_prompt, overlay_from_prompt_with_llm
 
 
 class PromptOverlayTests(unittest.TestCase):
+    def test_extract_prompt_symbols_ignores_macro_words(self):
+        symbols = extract_prompt_symbols("CPI 前谨慎，但想低位加仓 nvda，也看看 $MU，不要把 prompt 当股票")
+
+        self.assertIn("NVDA", symbols)
+        self.assertIn("MU", symbols)
+        self.assertNotIn("CPI", symbols)
+        self.assertNotIn("PROMPT", symbols)
+
+    def test_build_position_prompt_marks_new_symbols_positive(self):
+        prompt = "我想建仓msft和avgo和nvda"
+        symbols = sorted(extract_prompt_symbols(prompt))
+
+        overlay = overlay_from_prompt(prompt, symbols)
+
+        self.assertEqual(symbols, ["AVGO", "MSFT", "NVDA"])
+        for symbol in symbols:
+            self.assertIn(symbol, overlay["symbols"])
+            self.assertGreater(overlay["symbols"][symbol]["bias"], 0)
+            self.assertIn("symbol_positive", overlay["symbols"][symbol]["prompt_flags"])
+
     def test_llm_prompt_overlay_merges_with_rule_guardrails(self):
         raw_llm = {
             "symbols": {

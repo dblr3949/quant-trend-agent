@@ -21,11 +21,48 @@ _THESIS_STATUSES = {"intact", "watch", "broken"}
 _TRADE_PLANS = {"range_trade"}
 _NET_EXPOSURE_TARGETS = {"flat_required", "flat_preferred", "flexible"}
 _EVENT_DIRECTIONS = {"risk_off", "risk_on", "negative", "positive", "bearish", "bullish", "neutral"}
+_PROMPT_SYMBOL_EXCLUDES = {
+    "AI",
+    "API",
+    "ATR",
+    "BBAE",
+    "CPI",
+    "CSV",
+    "ETF",
+    "FOMC",
+    "GDP",
+    "IPO",
+    "JSON",
+    "LLM",
+    "MACD",
+    "MA",
+    "NFP",
+    "PCE",
+    "POC",
+    "PROMPT",
+    "RSI",
+    "USD",
+    "VAL",
+    "VAH",
+    "VIX",
+    "VWAP",
+}
 
 
 def _segments_for_symbol(prompt: str, symbol: str) -> list[str]:
-    pattern = re.compile(rf"(.{{0,30}}\b{re.escape(symbol)}\b.{{0,50}})", flags=re.IGNORECASE)
+    pattern = re.compile(rf"(.{{0,30}}(?<![A-Za-z]){re.escape(symbol)}(?![A-Za-z]).{{0,50}})", flags=re.IGNORECASE)
     return [match.group(1) for match in pattern.finditer(prompt)]
+
+
+def extract_prompt_symbols(prompt: str) -> set[str]:
+    symbols: set[str] = set()
+    for match in re.finditer(r"\$([A-Za-z]{1,6})|(?<![A-Za-z])([A-Za-z]{2,6})(?![A-Za-z])", str(prompt or "")):
+        raw = match.group(1) or match.group(2) or ""
+        symbol = raw.upper().strip()
+        if not symbol or symbol in _PROMPT_SYMBOL_EXCLUDES:
+            continue
+        symbols.add(symbol)
+    return symbols
 
 
 def _has_any(text: str, patterns: list[str]) -> bool:
@@ -149,7 +186,22 @@ def overlay_from_prompt(prompt: str, symbols: list[str]) -> dict:
             item["thesis_status"] = "broken"
             item["bias"] = min(float(item.get("bias", 0)), -2)
             notes.append("thesis_broken")
-        if not item.get("no_add") and not item.get("soft_no_add") and _has_any(text, [r"加仓", r"买", r"提高", r"看好", r"add", r"buy"]):
+        if not item.get("no_add") and not item.get("soft_no_add") and _has_any(
+            text,
+            [
+                r"建仓",
+                r"开仓",
+                r"新建.*仓",
+                r"买入",
+                r"配置",
+                r"加仓",
+                r"买",
+                r"提高",
+                r"看好",
+                r"add",
+                r"buy",
+            ],
+        ):
             item["bias"] = max(float(item.get("bias", 0)), 1)
             notes.append("symbol_positive")
         if _has_any(text, [r"减仓", r"卖", r"降低", r"降仓", r"reduce", r"sell"]):
