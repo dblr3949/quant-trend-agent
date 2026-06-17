@@ -32,6 +32,7 @@ from .portfolio_input import portfolio_from_text
 from .plan_summary import build_executive_summary
 from .prompt_overlay import merge_research_overlays, overlay_from_prompt_with_llm
 from .user_store import SESSION_DAYS, UserStore, auth_mode_enabled
+from .version import app_version_payload
 
 try:
     from zoneinfo import ZoneInfo
@@ -1088,6 +1089,7 @@ def make_handler(app: AgentApp):
                             "ok": True,
                             "storage_root": str(app.storage_root),
                             "auth": "users" if app.user_store else ("basic" if os.getenv("APP_PASSWORD") else "none"),
+                            "app": app_version_payload(),
                         }
                     )
                     return
@@ -1110,7 +1112,7 @@ def make_handler(app: AgentApp):
                     user_id = user["id"] if user else None
                     state = app.load_state(user_id=user_id)
                     latest = app.latest_run(user_id=user_id)
-                    self._json({"state": state, "runs": app.list_runs(user_id=user_id), "latest_run": latest})
+                    self._json({"state": state, "runs": app.list_runs(user_id=user_id), "latest_run": latest, "app": app_version_payload()})
                     return
                 if path == "/api/progress":
                     user_id = user["id"] if user else None

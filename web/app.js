@@ -517,6 +517,16 @@ function setStatus(text) {
   $("statusLine").textContent = text;
 }
 
+function renderAppVersion(app) {
+  const tag = $("appVersionTag");
+  if (!tag) return;
+  const version = app?.version ? `v${app.version}` : "版本未知";
+  const build = app?.build ? ` · ${app.build}` : "";
+  const releaseDate = app?.release_date ? ` · ${app.release_date}` : "";
+  tag.textContent = `${version}${build}`;
+  tag.title = `当前应用版本${releaseDate}${build ? ` · 构建 ${app.build}` : ""}`;
+}
+
 function setAuthVisible(authenticated, user = null) {
   currentUser = user;
   $("loginScreen").hidden = authenticated;
@@ -1624,6 +1634,7 @@ async function loadState() {
   const payload = await api("/api/state");
   appState = payload.state;
   latestRun = payload.latest_run;
+  renderAppVersion(payload.app || {});
   $("provider").value = appState.settings.provider || "massive";
   $("llmModel").value = appState.settings.llm_model || "qwen3.7-max";
   $("refreshHistory").checked = appState.settings.refresh_history !== false;

@@ -250,7 +250,8 @@ button:disabled {
   line-height: 1.45;
 }
 
-.user-tag {
+.user-tag,
+.version-tag {
   display: inline-flex;
   align-items: center;
   min-height: 30px;
@@ -261,6 +262,12 @@ button:disabled {
   color: #334556;
   font-size: 12px;
   font-weight: 650;
+}
+
+.version-tag {
+  border-color: #c8d7e2;
+  background: #eef6f8;
+  color: #31535c;
 }
 
 .topbar {

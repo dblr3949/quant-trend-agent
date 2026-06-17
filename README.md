@@ -1,339 +1,36 @@
-# Trend Quant Simulator
+# Semis Position Agent
 
-一个面向美股和 A 股趋势股的轻量模拟盘项目。核心回测和信号生成只使用 Python 标准库，不会连接券商，也不会真实下单。
+当前版本：`v0.4.0`
 
-## 功能
+半导体持仓调仓研究台。系统读取网页里手动维护的 BBAE 持仓、Massive/Polygon 行情、历史日线、当日分钟线、用户本轮调仓 prompt 和本地研究覆盖项，生成中文研究过程、重点总结和人工确认用的挂单建议。
 
-- 从 CSV 读取日线行情
-- 趋势策略回测：均线多头排列、动量过滤、ATR 风险控制
-- 生成每日观察信号
-- 维护本地模拟盘持仓
-- 美股 / A 股股票池分开配置
+边界很明确：
+
+- 不连接 BBAE 账户，不读取券商持仓、订单或成交。
+- IBKR 仅作为备用行情源；只读 market data，不读账户，不下单。
+- 所有建议都只是辅助决策；不会自动提交真实订单。
+- 真实密钥、持仓、跑批记录和行情缓存不提交到 Git。
 
 ## 目录
 
 ```text
-config/watchlists.json     股票池
-data/                      放历史行情 CSV
-reports/                   输出回测和信号结果
-state/paper_portfolio.json 模拟盘状态
-quant_trend/               核心代码
-scripts/                   命令行工具
-tests/                     标准库单元测试
+config/                  策略配置、示例 env、示例组合
+data/                    本地行情缓存和研究覆盖示例
+quant_trend/             后端计算、行情、LLM、Web 服务
+scripts/                 命令行工具和启动脚本
+tests/                   单元测试
+web/                     前端页面、CSS、JS
+Dockerfile               Railway/Render 部署镜像
+railway.json             Railway 部署配置
 ```
 
-## 行情 CSV 格式
+## 快速启动
 
-每个股票一个文件，放到 `data/` 目录下，文件名使用代码：
-
-- 美股：`data/MU.csv`
-- A 股：`data/600519.SH.csv`
-
-必须包含这些列：
-
-```csv
-date,open,high,low,close,volume
-2025-01-02,100,103,99,102,1234567
-```
-
-## 回测
-
-```bash
-python3 scripts/run_backtest.py --symbol MU --cash 100000
-```
-
-批量跑股票池：
-
-```bash
-python3 scripts/run_backtest.py --watchlist config/watchlists.json --cash 100000
-```
-
-## 生成今日趋势信号
-
-```bash
-python3 scripts/generate_signals.py --watchlist config/watchlists.json
-```
-
-输出文件：
-
-```text
-reports/signals.csv
-```
-
-## 模拟盘
-
-查看模拟盘：
-
-```bash
-python3 scripts/paper_trade.py show
-```
-
-按最新信号生成计划，不会真实交易：
-
-```bash
-python3 scripts/paper_trade.py plan --signals reports/signals.csv
-```
-
-手动记录模拟买入：
-
-```bash
-python3 scripts/paper_trade.py buy --symbol MU --price 120 --shares 10
-```
-
-手动记录模拟卖出：
-
-```bash
-python3 scripts/paper_trade.py sell --symbol MU --price 130 --shares 5
-```
-
-## 策略规则
-
-默认趋势信号：
-
-- `close > SMA20 > SMA50 > SMA150`
-- 近 60 日新高距离不超过 8%
-- 20 日成交量均值高于 60 日成交量均值
-- ATR 止损线用于控制风险
-
-回测买卖：
-
-- 买入：出现 `buy` 信号且无持仓
-- 卖出：跌破 SMA50、触发 ATR 止损、或趋势转弱
-- 单票风险按账户资金的 1% 估算仓位
-
-## 下载行情
-
-核心项目不依赖第三方包。若要自动下载：
-
-- 美股可安装 `yfinance`
-- A 股可安装 `akshare`
-- IBKR 实时行情可安装 `ibapi`，通过 TWS / IB Gateway 只读 Level I 快照
-- Massive/Polygon 中转行情可设置 `MASSIVE_API_KEY`，作为当前默认美股快照、日线和分钟线来源
-- 更可靠的美股实时/日线数据可使用 Alpaca Market Data，设置 `ALPACA_API_KEY`、`ALPACA_API_SECRET`，并优先使用 `ALPACA_DATA_FEED=sip`
+安装依赖：
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
-
-然后使用：
-
-```bash
-python3 scripts/download_data.py --market us --symbol MU --start 2024-01-01
-python3 scripts/download_data.py --market cn --symbol 600519 --start 2024-01-01
-```
-
-安装依赖和联网下载都可能需要你授权网络访问。
-
-用 Alpaca 下载美股日线：
-
-```bash
-ALPACA_DATA_FEED=sip python3 scripts/download_data.py --market us --provider alpaca --symbol MU --start 2024-01-01
-```
-
-## 半导体持仓 Agent
-
-这个 agent 是决策辅助工具，不连接券商，也不会真实下单。它读取你的 BBAE 组合、实时/近实时行情、日线技术面、宏观/研报/事件覆盖项，输出人工确认用的挂单建议。
-
-### 1. 准备日线
-
-至少下载这些标的的日线。默认使用 `^VIX` 作为真实 VIX 指数；Massive/Polygon 侧会映射到 `I:VIX`，如果指数权限不可用会对 `^VIX` 使用 Yahoo Chart 兜底。
-
-```bash
-for s in MU AAOI INTC LITE MRVL SPY SMH SOXX ^VIX; do
-  python3 scripts/download_data.py --market us --symbol "$s" --start 2024-01-01
-done
-```
-
-### 2. 准备组合
-
-参考 `config/portfolio.example.json` 创建 `config/portfolio.json`，填入 BBAE 的账户净值、现金/融资和当前股数。`thesis_status` 支持：
-
-- `intact`：基本面逻辑未破
-- `watch`：逻辑需要观察，自动降低目标权重
-- `broken`：逻辑破坏，目标权重归零
-
-也可以用脚本生成 `config/portfolio.json`，避免手改 JSON。
-
-从本地 CSV：
-
-```bash
-python3 scripts/import_portfolio.py \
-  --csv portfolio.csv \
-  --account-equity 100000 \
-  --cash -60000 \
-  --margin-debit 60000
-```
-
-CSV 列名支持英文或中文：
-
-```csv
-symbol,shares,avg_cost,thesis_status,conviction
-MU,300,115,intact,1
-AAOI,500,20,intact,0.85
-INTC,400,31,watch,0.55
-LITE,180,65,intact,0.9
-MRVL,220,78,intact,0.9
-```
-
-从在线 CSV，例如 Google Sheet 发布后的 CSV 链接：
-
-```bash
-python3 scripts/import_portfolio.py \
-  --url "https://docs.google.com/spreadsheets/d/e/.../pub?output=csv" \
-  --account-equity 100000 \
-  --cash -60000 \
-  --margin-debit 60000
-```
-
-从自然语言：
-
-```bash
-python3 scripts/import_portfolio.py --text "
-账户净值 10万 现金 -6万 融资 6万
-MU 300股 成本115 intact 信心1
-AAOI 500股 成本20 intact 信心0.85
-INTC 400股 成本31 watch 信心0.55
-LITE 180股 成本65 intact 信心0.9
-MRVL 220股 成本78 intact 信心0.9
-"
-```
-
-自然语言输入必须包含账户净值。因为这个 agent 要管理 2x 杠杆，缺净值就无法判断仓位比例。
-
-### 3. 拉实时报价
-
-当前默认使用 Massive/Polygon 中转 REST 作为美股快照、日线和分钟线来源。程序按单标的查询，不做全市场 snapshot、批量全量、Flat Files 或期权全链 quotes；持仓仍只来自你手动输入的 BBAE 表格，不读取任何券商账户。
-
-先在本地私密配置里填 Massive key：
-
-```bash
-cp config/openai.env.example config/openai.env
-```
-
-```env
-MASSIVE_API_KEY=REPLACE_WITH_MASSIVE_PROXY_KEY
-MASSIVE_REST_URL=http://44.219.45.87:8081
-MASSIVE_WS_URL=ws://44.219.45.87:8080/ws
-```
-
-默认拉 Massive 行情：
-
-```bash
-python3 scripts/fetch_quotes.py --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
-```
-
-IBKR 仍可作为备用。启动 TWS 或 IB Gateway 后，在 API 设置中启用 Socket 客户端，并确认端口：
-
-```bash
-python3 scripts/fetch_quotes.py --provider ibkr \
-  --ibkr-host 127.0.0.1 \
-  --ibkr-port 7497 \
-  --ibkr-client-id 81 \
-  --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
-```
-
-如果这个 IBKR 账号没有订阅实时美股行情，可以先用延迟行情测试链路：
-
-```bash
-python3 scripts/fetch_quotes.py --provider ibkr \
-  --ibkr-market-data-type 3 \
-  --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
-```
-
-IBKR 脚本不会调用账户/仓位/订单接口；你的真实仓位只来自 `config/portfolio.json` 或网页表格。
-
-Alpaca 仍可作为备用：
-
-```bash
-ALPACA_API_KEY=... ALPACA_API_SECRET=... ALPACA_DATA_FEED=sip \
-  python3 scripts/fetch_quotes.py --provider alpaca --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
-```
-
-没有数据账号时可先演示：
-
-```bash
-python3 scripts/fetch_quotes.py --provider yfinance --symbols MU,AAOI,INTC,LITE,MRVL,SPY,SMH,SOXX,^VIX
-```
-
-### 4. 更新事件/研报覆盖
-
-参考 `data/research_overlay.example.json` 创建 `data/research_overlay.json`。宏观、流动性、战争、IPO/大额融资等事件可以写成：
-
-```json
-{
-  "liquidity_bias": -1,
-  "events": [
-    {
-      "name": "large_ai_ipo_liquidity_drain",
-      "direction": "risk_off",
-      "severity": 1,
-      "expires": "2026-06-12"
-    }
-  ]
-}
-```
-
-### 5. 生成挂单建议
-
-```bash
-python3 scripts/position_agent.py \
-  --portfolio config/portfolio.json \
-  --quotes data/live_quotes.json \
-  --research data/research_overlay.json
-```
-
-输出：
-
-- `reports/agent_plan.json`：完整上下文、市场状态、权重、原因、数据警告
-- `reports/agent_orders.csv`：挂单方向、股数、限价、金额、理由
-
-### 推荐日常闭环
-
-每天触发后按这个顺序：
-
-1. 用 BBAE 当前页面或在线表格更新持仓，运行 `scripts/import_portfolio.py`
-2. 拉行情：`scripts/fetch_quotes.py`
-3. 录入当天调仓 prompt，例如“CPI 前不主动加仓，MU 回踩才加，INTC 只减不加”
-4. 运行 `scripts/position_agent.py`
-5. 人工确认 `reports/agent_orders.csv`，在 BBAE 手动挂单
-6. 成交后再次更新持仓并重跑，防止仓位滞后
-
-## 本地网页工作台
-
-启动本地服务：
-
-```bash
-python3 scripts/run_agent_app.py
-```
-
-然后打开：
-
-```text
-http://127.0.0.1:8765
-```
-
-网页支持：
-
-- 表格输入/修改持仓
-- 自然语言解析持仓
-- 手动输入维持保证金，用 `账户净值 - 维持保证金` 估算保证金安全垫，用于限制新增买单预算
-- 手动输入目标杠杆参考；更保守会直接采纳，更激进会被风险环境截断
-- 每个持仓可选择仓位桶和交易约束，例如核心、卫星、清理、不主动加、不主动减
-- 输入本次调仓想法 prompt
-- 一键生成调仓建议
-- 生成时显示可拖动的研究进度窗口，包含步骤、评分和错误
-- 展示当日分钟线摘要：开盘至今、VWAP 偏离、近 30 分钟、区间位置
-- 保存每次跑批记录到 `reports/agent_runs/`
-- 查看上一轮到本轮的持仓股数变化
-- 服务运行期间可开启盘前/盘后自动跑批
-- Massive/Polygon 默认行情设置和连接测试
-- IBKR 只读行情设置和连接测试，作为备用
-
-默认 Massive/Polygon 是主行情源。`Yahoo chart` 只适合 baseline 和流程调试，不是实时交易行情；`file` 可读取你自己写入的 `data/live_quotes.json`。
-
-### OpenAI / Codex 配置
-
-网页里的 `重点总结` 可以调用 OpenAI API 生成更像研究员口径的中文摘要。ChatGPT/Codex Pro 订阅不能直接作为本地程序的 API 凭证；本地服务需要单独的 `OPENAI_API_KEY`。没有 key 时，程序会自动使用本地兜底总结。
 
 创建本地私密配置：
 
@@ -341,91 +38,573 @@ http://127.0.0.1:8765
 cp config/openai.env.example config/openai.env
 ```
 
-然后只在 `config/openai.env` 里填真实 key：
+常用环境变量：
 
 ```env
-OPENAI_API_KEY=REPLACE_WITH_OPENAI_API_KEY
-OPENAI_MODEL=gpt-5.5
-OPENAI_DECISION_REASONING_EFFORT=medium
-OPENAI_SUMMARY_REASONING_EFFORT=medium
-OPENAI_DECISION_VERBOSITY=low
-OPENAI_SUMMARY_VERBOSITY=medium
 MASSIVE_API_KEY=REPLACE_WITH_MASSIVE_PROXY_KEY
 MASSIVE_REST_URL=http://44.219.45.87:8081
 MASSIVE_WS_URL=ws://44.219.45.87:8080/ws
+
+DASHSCOPE_API_KEY=REPLACE_WITH_DASHSCOPE_KEY
+OPENAI_API_KEY=REPLACE_WITH_OPENAI_KEY
+DEEPSEEK_API_KEY=REPLACE_WITH_DEEPSEEK_KEY
+OPENAI_MODEL=qwen3.7-max
 ```
 
-默认使用 `gpt-5.5`。点位复核和重点总结默认都用 `medium` 推理档位；当前输入量下，这比 `high/xhigh` 更稳定地产出 JSON 价梯，也更可控。如果后续要单独拆模型，可以额外设置 `OPENAI_DECISION_MODEL` 或 `OPENAI_SUMMARY_MODEL`。
-
-`config/openai.env` 已加入 `.gitignore`，不会被提交。修改后重启网页服务：
+启动本地网页：
 
 ```bash
 python3 scripts/run_agent_app.py
 ```
 
-服务启动时只会打印已加载的 key 名，不会打印密钥值。网页结果里如果 `重点总结` 标签显示 `LLM`，说明已经走 OpenAI API；如果显示 `本地兜底`，说明未配置 key 或 API 调用失败。
+打开：
 
-### IBKR 行情
+```text
+http://127.0.0.1:8765
+```
 
-网页里选择 `IBKR 只读行情` 后会出现 Gateway/TWS 参数：
+云端生产地址：
 
-- Gateway paper 常见端口：`4002`
-- Gateway live 常见端口：`4001`
-- TWS paper 常见端口：`7497`
-- TWS live 常见端口：`7496`
-- 行情类型：`1` 实时，`3` 延迟
+```text
+https://quant-trend-agent-production.up.railway.app
+```
 
-网页的 `测试 IBKR 行情` 只调用行情快照接口；生成建议时还会调用 IBKR 历史行情接口读取当日分钟线。安全边界是：
+## 版本号
 
-- 允许：`reqMktData` / `cancelMktData`
-- 允许：`reqHistoricalData` / `cancelHistoricalData`
-- 禁止：账户、持仓、订单、成交、下单接口
+版本号定义在 `quant_trend/version.py`。
 
-如果看到 `No market data during competing live session`，说明 IBKR 已连接但行情被同账号的其它 live session 占用，需要关闭其它占用行情的 TWS/Gateway/移动端行情窗口，或换一个有行情权限的用户。
+前端 topbar 会展示当前应用版本，例如 `v0.4.0`。后端接口也会返回版本：
 
-### 云端部署
+```bash
+curl https://quant-trend-agent-production.up.railway.app/healthz
+```
 
-项目包含 `Dockerfile`、`railway.json` 和 `render.yaml`，可部署成单用户私有网页。云端必须设置：
+版本策略：
 
-- `APP_USERNAME`：网页登录用户名，默认可用 `agent`
-- `APP_PASSWORD`：网页登录密码
-- `APP_DATA_DIR=/data`：持久化状态、持仓、跑批记录和行情缓存
-- `OPENAI_API_KEY`
-- `MASSIVE_API_KEY`
+- 小修 UI、文案、README：patch，例如 `0.4.1`
+- 改计算口径、数据源、LLM 输入：minor，例如 `0.5.0`
+- 改数据结构或多用户/数据库等兼容性风险较大的内容：major，例如 `1.0.0`
 
-Railway/Render 上要挂载持久化 volume/disk 到 `/data`，否则重新部署后网页里保存的持仓和跑批记录会丢失。本地运行时不设置 `APP_PASSWORD` 就不会启用浏览器密码弹窗。
+Railway 如果提供 commit sha，前端会在版本号后展示短构建号；如果没有，只展示显式版本。
 
-部署后更新流程是：本地修改代码，提交并推送到 GitHub，云平台自动重新构建；用户刷新同一个网址即可使用新版。
+## 数据来源
 
-### Prompt 约束
+### 持仓与账户
 
-- “不主动加仓 / 只减不加 / 少加仓”会被解析成软约束：证据不足时尊重，证据很强时可以反驳并在原因里写出证据分
-- “绝对不加仓 / 禁止加仓 / 严禁加仓 / hard no add”会被解析成硬约束：不会生成买入建议
-- 持仓表里的交易约束也是软约束：Agent 可以反驳，但会在原因里写出证据分
-- 维持保证金安全垫低于安全线时，新增买单预算会被压到 0；高于安全线时，会按安全垫倒推可用买单额度
+持仓只来自网页表格或本地输入。核心字段：
 
-### Git 同步与脱敏
+- `账户净值`：用于计算仓位比例和总杠杆。
+- `现金`：可为负数。
+- `融资`：记录风险，不直接作为强平线。
+- `维持保证金`：低于它可能触发强平；系统用 `账户净值 - 维持保证金` 估算保证金安全垫。
+- `目标杠杆`：用户偏好，不是硬命令；更保守会采纳，更激进会被市场和风控截断。
+- 每个持仓：`代码 / 股数 / 成本 / 状态 / 信心 / 桶 / 约束`。
 
-仓库只提交程序、示例配置和测试。下面这些本地文件不会提交：
+### 行情
 
-- `config/openai.env`：真实 OpenAI API key
-- `config/portfolio.json`：真实 BBAE 持仓和账户输入
-- `state/`：网页保存状态
-- `data/*.csv`、`data/live_quotes.json`：本地行情缓存
-- `reports/`：每次跑批、截图和调仓建议记录
+默认主行情源是 Massive/Polygon 中转 REST：
 
-提交前建议运行：
+- 快照：现价、bid/ask、昨收等。
+- 日线：补齐本地 CSV，默认最多约两年窗口。
+- 分钟线：当日或最近一个美股交易日的分钟聚合。
+- `^VIX` 映射到 Polygon 的 `I:VIX`；指数权限不可用时仅对 `^VIX` 用 Yahoo Chart 兜底。
+
+限制：
+
+- 不做全市场 snapshot。
+- 不做 Flat Files。
+- 不做批量全量。
+- 不订阅期权全链 quotes。
+
+IBKR 作为备用行情源，只允许：
+
+- `reqMktData`
+- `cancelMktData`
+- `reqHistoricalData`
+- `cancelHistoricalData`
+
+禁止读取账户、持仓、订单、成交，禁止下单。
+
+### 用户 Prompt
+
+“本次调仓想法”会先进入 `prompt_overlay`。当前是：
+
+```text
+LLM 解析 + 规则护栏 + 规则兜底
+```
+
+规则：
+
+- “绝对不加仓 / 禁止加仓 / 严禁加仓 / 必须不加”会变成硬约束。
+- “不主动加 / 少加 / 只在深回撤加”会变成软约束或条件。
+- “不主动卖 / 尽量不卖”会变成 `soft_no_reduce`，只有强技术面或风控证据才会反驳。
+- “做T / 高抛低吸 / 低买高卖”会触发 `range_trade`。
+- “总仓位不变”是 `flat_preferred`；“必须总仓位不变”才是 `flat_required`。
+- LLM 不能删除规则识别出的硬约束，不能引入股票池外 symbol。
+- LLM 失败、没 key、空输出或 JSON 解析失败时自动回规则解析。
+
+解析后的字段会进入点位复核 LLM 和重点总结 LLM，包括：
+
+- `no_add / soft_no_add`
+- `no_reduce / soft_no_reduce`
+- `trade_plan`
+- `target_net_exposure`
+- `buy_condition / sell_condition`
+- `risk_trigger`
+- `evidence / explanation`
+- `macro_bias / liquidity_bias / geopolitical_bias`
+
+## 一轮建议的计算流程
+
+### 1. 确认股票池
+
+股票池来自三部分并集：
+
+- `config/agent_config.json` 里的默认持仓标的
+- 当前网页持仓里的 symbol
+- 市场代理：`SPY / SMH / SOXX / ^VIX`
+
+### 2. 补齐历史日线
+
+先检查本地 CSV 是否到最近完整美股交易日；缺失或过旧则从 Massive/Polygon 拉取。日线用于：
+
+- 均线
+- ATR
+- 趋势信号
+- 支撑/压力
+- Volume Profile
+- 自动锚定 VWAP
+- 风险调整动量
+- 区间波动率
+
+### 3. 读取实时快照和分钟线
+
+快照用于：
+
+- 当前价格
+- 仓位市值
+- 目标权重差额
+- 限价参考价
+- 报价新鲜度检查
+
+当日分钟线用于：
+
+- 开盘至今涨跌
+- VWAP 偏离
+- 近 30 分钟走势
+- 日内区间位置
+- 订单流/VPIN 近似
+
+日内数据只做辅助。支撑/压力展示和挂单点位会优先历史结构，日内点位在候选评分中会被扣分。
+
+## 技术面计算口径
+
+### 趋势快照
+
+每个标的根据日线生成 `TechnicalSnapshot`：
+
+- `SMA20 / SMA50 / SMA150`
+- `ATR14`
+- 近 60 日高点
+- 趋势动作：`buy / watch / sell / hold`
+- 趋势止损线
+- 报价年龄和 stale quote 标记
+
+报价过旧或只有前收盘兜底时，不允许触发新增买单。
+
+### 支撑/压力候选
+
+每个标的会生成多周期候选点位：
+
+- 日线结构：`5 / 10 / 20 / 50 / 63 / 90 / 126 / 180 / 252` 日前高前低。
+- Volume Profile：`20 / 60 / 90 / 126 / 180 / 252` 日。
+- 摆动前高/前低：`20 / 60 / 90 / 126 / 180 / 252` 日。
+- 自动锚定 VWAP：
+  - `20 / 60 / 90 / 126 / 180 / 252` 日高低点锚。
+  - 近 252 日放量上攻、放量下杀、跳空、突破、跌破、财报式冲击锚。
+  - 近 180 日摆动高低点锚。
+- 均线和趋势止损线。
+- 当日 VWAP、当日高低点、近 30 分钟点位。
+- 当日高量分钟 bar 的高低点和成交均价。
+
+### Volume Profile
+
+Volume Profile 使用日线 OHLCV 近似计算：
+
+1. 取指定窗口内的日线。
+2. 用窗口最高/最低划分价格桶。
+3. 每根日线的成交量按其高低区间均匀分配到覆盖的价格桶。
+4. 得到每个价格桶的估算成交量。
+
+输出：
+
+- `POC`：成交量最大的价格桶。
+- `VAH`：70% value area 上沿。
+- `VAL`：70% value area 下沿。
+- `HVN`：高成交量节点。
+- `LVN`：低成交量真空区。
+- `volume_share_pct`：单价格桶成交占比。
+- `chip_share_pct`：目标桶及左右相邻桶的合计占比，用来近似该区域筹码/成交堆积。
+
+这是基于日线的成交分布近似，不是逐笔成交的真实筹码分布。
+
+### 点位强度
+
+每个支撑/压力会计算：
+
+- `level_strength_score`：0 到 5。
+- `confluence_count`：附近共振点位数量。
+- `touch_count`：近 252 日触碰次数。
+- `recency_days`：最近触碰距今天数。
+- `chip_share_pct`：附近三桶成交占比。
+- `volume_share_pct`：单桶成交占比。
+- `tier`：
+  - `近端`
+  - `主结构`
+  - `深水/高抛`
+  - `日内辅助`
+
+强度得分由类别、成交占比、共振、触碰次数、近期性和锚点质量共同构成。
+
+### 风险调整动量
+
+计算 `20 / 60 / 120` 日风险调整收益：
+
+```text
+窗口收益 / 窗口实现波动率
+```
+
+权重：
+
+```text
+20日 50% + 60日 30% + 120日 20%
+```
+
+输出 `risk_adjusted_momentum.score`，进入量价总分、前端展示、LLM 输入。
+
+### 区间波动率
+
+使用多种 OHLC 波动率估计：
+
+- ATR
+- Parkinson
+- Garman-Klass
+- Rogers-Satchell
+- Yang-Zhang
+
+形成 `range_volatility.blended_daily_pct` 和年化估计，用于：
+
+- 判断点位间距是否需要放宽。
+- 影响买卖候选区间。
+- 输入 LLM 解释。
+
+### 订单流/VPIN 近似
+
+没有逐笔成交时，系统用分钟聚合 bar 估算订单流：
+
+- 用分钟 bar 收盘位置和涨跌方向估算 signed volume。
+- 估算买量、卖量、净失衡。
+- 计算近 30 分钟失衡。
+- 按成交量桶计算 VPIN 近似。
+- 如果有 bid/ask，则评估价差质量。
+
+这不是真实逐笔 VPIN，只是分钟聚合近似。
+
+### 量价总分
+
+每个股票的量价分范围是：
+
+```text
+-6 ~ +6
+```
+
+组成：
+
+- 趋势/均线
+- 多周期动量
+- 区间波动率
+- 支撑/压力位置
+- 量能确认
+- 订单流/VPIN
+- 当日趋势
+
+分数会用于：
+
+- 前端“近期量价点位”展示。
+- 每只股票目标权重的轻微上调/下调。
+- 挂单候选排序。
+- 重点总结 LLM。
+- 点位复核 LLM。
+
+## 市场环境计算
+
+### SPY / SMH / SOXX
+
+指数 ETF 使用和个股相同的量价框架：
+
+- 趋势/均线
+- 支撑/压力
+- Volume Profile
+- 动量
+- 波动率
+- 分钟线
+
+它们进入 `market_technical_analysis`，再合成 `market_structure`。
+
+### ^VIX
+
+`^VIX` 不按股票成交量/POC 解释，而用专属波动率口径：
+
+- 当前绝对水平。
+- 近 252 日历史分位。
+- 近 126 日 Z-score。
+- 5 日变化。
+- 相对 20 日均值偏离。
+- 日内变化方向。
+
+`^VIX` 输出进入 `volatility_analysis`，再以 `volatility_risk` 方式影响市场结构。VIX 越高、分位越高、短期升幅越大，越偏 `risk_off`。
+
+### Regime
+
+市场状态输出：
+
+- `risk_on`
+- `neutral`
+- `risk_off`
+
+影响：
+
+- 目标总杠杆。
+- 买入折价深度。
+- 卖出溢价要求。
+- 风险预算和保证金约束。
+
+## 仓位与股数计算
+
+### 目标总仓位
+
+基础目标总仓位由市场状态决定：
+
+- `risk_on_gross_exposure`
+- `neutral_gross_exposure`
+- `risk_off_gross_exposure`
+
+用户填写的目标杠杆会作为参考：
+
+- 如果用户目标更保守，通常会采纳。
+- 如果用户目标更激进，会被市场状态、最大杠杆和保证金约束截断。
+
+### 单票目标权重
+
+单票基础权重来自 `config/agent_config.json`，再乘以多个因子：
+
+- 趋势信号。
+- 基本面状态：`intact / watch / broken`。
+- 信心值。
+- prompt/research bias。
+- 日内趋势。
+- 量价分 multiplier。
+- 桶分类：`core / satellite / watch / trim / auto`。
+- 持仓约束：`prefer_hold / soft_no_add / soft_no_reduce / reduce_only`。
+
+随后归一化到目标总仓位，并应用单票上限：
+
+- `max_symbol_weight`
+- `max_noncore_symbol_weight`
+
+### 买卖预算
+
+系统不是先拍股数，而是先算金额：
+
+```text
+目标金额 = 目标权重 × 账户净值
+差额 = 目标金额 - 当前市值
+```
+
+然后根据以下约束裁剪：
+
+- 最大总杠杆。
+- 当前总仓位。
+- 维持保证金安全垫。
+- 最小交易金额。
+- 再平衡带宽。
+- stale quote 禁买。
+- 硬约束禁止买/卖。
+
+最后：
+
+```text
+股数 = 可交易金额 // 限价
+```
+
+卖出股数不会超过当前持仓。
+
+## 限价和价梯
+
+### 后端确定性点位
+
+买单和卖单会先生成候选点位，然后按结构选择主限价：
+
+买单优先：
+
+- 现价下方。
+- 落在买入折价区间内。
+- 有历史支撑、POC、VAL、HVN、AVWAP 或摆动前低。
+- 成交/筹码占比高。
+- 共振多。
+- 日内点位会降权。
+
+卖单优先：
+
+- 现价上方。
+- 落在卖出溢价区间内。
+- 有历史压力、VAH、HVN、AVWAP 或摆动前高。
+- 成交/筹码占比高。
+- 可触达，不选明显脱离结构的孤立远点。
+
+折价/溢价区间由：
+
+- ATR
+- 混合区间波动率
+- 市场状态
+- `market_structure.score`
+
+共同决定。
+
+### LLM 点位复核
+
+后端先给出候选 `candidate_levels`，LLM 只能从候选主点位里选择，不能编造主执行价。
+
+LLM 输入包括：
+
+- 每张订单的候选点位，最多 8 个。
+- 当前股票前 8 个支撑和前 8 个压力。
+- Volume Profile、筹码占比、点位强度、AVWAP。
+- 动量、波动率、订单流。
+- SPY/SMH/SOXX 市场技术面。
+- `^VIX` 波动率风险。
+- 仓位、杠杆、保证金。
+- prompt_overlay 和 decision_context。
+
+LLM 可以：
+
+- 改主候选点位。
+- 调整建议股数，但买入不能突破预算保护，卖出不能超过持仓。
+- 输出 2-3 档 `reference_ladder`。
+
+价梯是参考分层，不会自动下单。
+
+## 重点总结
+
+重点总结 LLM 读取整张 plan 的压缩版：
+
+- 市场框架：SPY、SMH、SOXX、`^VIX`。
+- 每只股票的现价、动作、权重变化、挂单。
+- 量价分、趋势分、日内分。
+- 支撑/压力、Volume Profile、AVWAP、筹码占比。
+- 订单流、波动率、动量。
+- prompt 解析结果。
+- LLM 点位复核结果和参考价梯。
+- 数据警告和弱覆盖事件。
+
+所有评分必须按：
+
+```text
+分数 / 下限~上限 · 尺位xx%
+```
+
+例如：
+
+```text
+量价 +2.4 / -6~+6 · 尺位70%
+```
+
+这里的“尺位”是评分尺位置，不是历史样本分位。
+
+## 网页功能
+
+网页支持：
+
+- 多用户登录。
+- 表格维护持仓和账户信息。
+- 保存 Massive/IBKR/Yahoo/Alpaca 行情设置。
+- 测试 Massive 或 IBKR 行情。
+- 读取当日分钟线。
+- 输入本轮调仓 prompt。
+- 生成调仓建议。
+- 显示研究进度。
+- 展示重点总结、建议挂单、价梯、杠杆和市场结构。
+- 展示近期量价点位、K 线大图、支撑/压力、指标说明。
+- 保存跑批记录。
+- 前端展示当前应用版本。
+
+自然语言持仓解析入口目前保留但禁用；当前持仓以表格为准。
+
+## 云端部署
+
+Railway 使用：
+
+- `Dockerfile`
+- `railway.json`
+- `/data` 持久化 volume
+
+关键环境变量：
+
+```env
+APP_DATA_DIR=/data
+APP_USERNAME=...
+APP_PASSWORD=...
+MASSIVE_API_KEY=...
+DASHSCOPE_API_KEY=...
+OPENAI_API_KEY=...
+DEEPSEEK_API_KEY=...
+APP_VERSION=0.4.0
+```
+
+如果启用多用户数据库，持仓、设置、跑批记录会写入 `/data` 下的持久化数据库或文件。Railway 重新部署不会清空 `/data` volume。
+
+常用部署流程：
+
+```bash
+python3 -m unittest discover -s tests
+node --check web/app.js
+python3 scripts/check_repo_safety.py
+git add .
+git commit -m "..."
+git push origin main
+npx @railway/cli up --detach
+npx @railway/cli status
+```
+
+线上健康检查：
+
+```bash
+curl https://quant-trend-agent-production.up.railway.app/healthz
+```
+
+## Git 脱敏
+
+不要提交：
+
+- `config/openai.env`
+- `config/portfolio.json`
+- `state/`
+- `data/*.csv`
+- `data/live_quotes.json`
+- `data/research_overlay.json`
+- `reports/`
+
+提交前运行：
 
 ```bash
 python3 scripts/check_repo_safety.py
 ```
 
-它会检查已跟踪文件里是否误加入私密路径或疑似密钥。
+## 测试
 
-关键风控：
-
-- 超过 `max_quote_age_minutes` 的报价不会触发加仓
-- 总风险暴露不超过 `max_gross_exposure`
-- `risk_off` 时自动降总仓位目标
-- `watch` / `broken` 基本面状态会降低或清零目标权重
-- 单票权重受 `max_symbol_weight` / `max_noncore_symbol_weight` 限制
+```bash
+python3 -m unittest discover -s tests
+node --check web/app.js
+python3 -m py_compile quant_trend/prompt_overlay.py quant_trend/app_server.py quant_trend/agent.py quant_trend/llm_decision.py
+git diff --check
+```
