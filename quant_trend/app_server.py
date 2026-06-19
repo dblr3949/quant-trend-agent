@@ -44,7 +44,7 @@ APP_STATE = "state/agent_app_state.json"
 RUNS_DIR = "reports/agent_runs"
 RUN_ID_LENGTH = 22
 DEFAULT_LLM_MODEL = "deepseek-v4-pro"
-ENABLED_LLM_MODELS = {"deepseek-v4-pro", "deepseek-v4-flash", "qwen3.7-max"}
+ENABLED_LLM_MODELS = {"deepseek-v4-pro", "deepseek-v4-flash"}
 LEGACY_LLM_MODEL_ALIASES = {
     "deepseek-chat": "deepseek-v4-flash",
     "deepseek-reasoner": "deepseek-v4-flash",

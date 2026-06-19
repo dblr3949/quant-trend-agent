@@ -23,14 +23,14 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(_normalize_llm_model("deepseek-chat"), "deepseek-v4-flash")
         self.assertEqual(_normalize_llm_model("deepseek-reasoner"), "deepseek-v4-flash")
         self.assertEqual(_normalize_llm_model("deepseek-v4-flash"), "deepseek-v4-flash")
-        self.assertEqual(_normalize_llm_model("qwen3.7-max"), "qwen3.7-max")
+        self.assertEqual(_normalize_llm_model("qwen3.7-max"), "deepseek-v4-pro")
 
-    def test_legacy_qwen_default_migrates_to_deepseek_once(self):
+    def test_qwen_is_disabled_and_migrates_to_deepseek(self):
         migrated = _normalize_settings({"llm_model": "qwen3.7-max"})
         explicit_qwen = _normalize_settings({"llm_model": "qwen3.7-max", "llm_model_default_version": DEFAULT_SETTINGS["llm_model_default_version"]})
 
         self.assertEqual(migrated["llm_model"], "deepseek-v4-pro")
-        self.assertEqual(explicit_qwen["llm_model"], "qwen3.7-max")
+        self.assertEqual(explicit_qwen["llm_model"], "deepseek-v4-pro")
 
     def test_legacy_deepseek_default_migrates_to_v4_pro(self):
         migrated = _normalize_settings({"llm_model": "deepseek-chat", "llm_model_default_version": 2})
