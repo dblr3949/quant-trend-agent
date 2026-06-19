@@ -191,21 +191,21 @@
               <span>账户净值 <span class="hint" title="必须手动来自 BBAE；不是从 IBKR 读取。">?</span></span>
               <input id="accountEquity" type="number" step="0.01" />
             </label>
-            <label class="field" title="BBAE 当前现金，可为负数。">
-              <span>现金 <span class="hint" title="两倍杠杆时现金可能为负，按 BBAE 当前值填。">?</span></span>
-              <input id="cash" type="number" step="0.01" />
+            <label class="field" title="可留空。留空时用账户净值减当前持仓市值估算现金；两倍杠杆时估算值可能为负。">
+              <span>现金 <span class="hint" title="可不填；系统会按 净值 - 持仓市值 粗略估算。">?</span></span>
+              <input id="cash" type="number" step="0.01" placeholder="留空自动估算" />
             </label>
-            <label class="field" title="BBAE 当前融资/借款金额。">
-              <span>融资 <span class="hint" title="用于记录风险，不从 IBKR 读取。">?</span></span>
-              <input id="marginDebit" type="number" step="0.01" />
+            <label class="field" title="可留空。留空时若估算现金为负，就把负现金的绝对值作为融资粗估。">
+              <span>融资 <span class="hint" title="可不填；系统会按 max(0, 持仓市值 - 净值) 粗略估算。">?</span></span>
+              <input id="marginDebit" type="number" step="0.01" placeholder="留空自动估算" />
             </label>
-            <label class="field" title="BBAE 维持保证金/强平阈值。Agent 用账户净值减它来估算保证金安全垫。">
-              <span>维持保证金 <span class="hint" title="填低于它可能触发强平的维持保证金要求，不是融资借款金额。">?</span></span>
-              <input id="maintenanceMargin" type="number" step="0.01" />
+            <label class="field" title="可留空。留空时按持仓市值的约30%粗估维持保证金，只作风险预算参考。">
+              <span>维持保证金 <span class="hint" title="有券商准确值就填；不填会按持仓市值粗估，并在结果里标注估算来源。">?</span></span>
+              <input id="maintenanceMargin" type="number" step="0.01" placeholder="留空自动估算" />
             </label>
-            <label class="field" title="你希望的大致目标杠杆。Agent 会参考，但风险环境不支持时会截断。">
-              <span>目标杠杆 <span class="hint" title="例如 1.25；这是参考值，不是硬命令。">?</span></span>
-              <input id="targetGrossHint" type="number" step="0.01" min="0" />
+            <label class="field" title="可留空。留空时按市场状态自动生成目标杠杆；填写后也只是弱约束。">
+              <span>目标杠杆 <span class="hint" title="例如 1.25；只是偏好，不是硬命令；更激进会被市场/风控截断。">?</span></span>
+              <input id="targetGrossHint" type="number" step="0.01" min="0" placeholder="留空自动判断" />
             </label>
           </div>
 

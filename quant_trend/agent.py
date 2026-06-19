@@ -65,7 +65,10 @@ DEFAULT_CONFIG = {
         "limit_offset_bps": 15.0,
         "max_limit_offset_bps": 80.0,
         "min_margin_cushion": 50000.0,
+        "min_margin_cushion_pct": 0.20,
+        "min_margin_cushion_floor": 5000.0,
         "margin_buy_power_haircut": 0.5,
+        "estimated_maintenance_margin_rate": 0.30,
         "stress_drop_pct": 0.05,
         "target_hint_upside_cap_risk_off": 0.25,
         "target_hint_upside_cap_neutral": 0.35,
@@ -892,19 +895,69 @@ def _apply_target_gross_hint(auto_target: float, portfolio: Portfolio, regime_la
     return applied, [f"user_target_gross_applied:{applied:.2f}"]
 
 
-def _margin_cushion(portfolio: Portfolio) -> tuple[float | None, str | None]:
+def _effective_min_margin_cushion(equity: float, risk: dict) -> float:
+    configured = float(risk.get("min_margin_cushion", 50000.0))
+    pct_floor = float(equity) * float(risk.get("min_margin_cushion_pct", 0.20))
+    cash_floor = float(risk.get("min_margin_cushion_floor", 5000.0))
+    return min(configured, max(cash_floor, pct_floor))
+
+
+def _should_estimate_cash_margin(portfolio: Portfolio, current_gross_value: float) -> bool:
+    if portfolio.cash_input_missing or portfolio.margin_debit_input_missing:
+        return True
+    cash = float(portfolio.cash or 0.0)
+    margin_debit = float(portfolio.margin_debit or 0.0)
+    mismatch = abs(float(current_gross_value) + cash - float(portfolio.account_equity))
+    tolerance = max(5.0, abs(float(portfolio.account_equity)) * 0.001)
+    return abs(cash) < 0.01 and abs(margin_debit) < 0.01 and mismatch > tolerance
+
+
+def _resolved_account_fields(portfolio: Portfolio, current_gross_value: float, risk: dict) -> dict:
+    estimate_cash_margin = _should_estimate_cash_margin(portfolio, current_gross_value)
+    if estimate_cash_margin:
+        cash = float(portfolio.account_equity) - float(current_gross_value)
+        margin_debit = max(0.0, -cash)
+        cash_source = "estimated_from_positions"
+        margin_debit_source = "estimated_from_positions"
+    else:
+        cash = float(portfolio.cash or 0.0)
+        margin_debit = float(portfolio.margin_debit or 0.0)
+        cash_source = "input"
+        margin_debit_source = "input"
+
     if portfolio.maintenance_margin is not None:
-        return portfolio.account_equity - float(portfolio.maintenance_margin), "maintenance_margin"
-    if portfolio.excess_liquidity is not None:
-        return float(portfolio.excess_liquidity), "legacy_excess_liquidity"
-    return None, None
+        maintenance_margin = float(portfolio.maintenance_margin)
+        maintenance_margin_source = "input"
+    else:
+        maintenance_margin = max(0.0, float(current_gross_value) * float(risk.get("estimated_maintenance_margin_rate", 0.30)))
+        maintenance_margin_source = "estimated_from_gross_exposure"
+
+    if portfolio.excess_liquidity is not None and portfolio.maintenance_margin is None:
+        margin_cushion = float(portfolio.excess_liquidity)
+        margin_cushion_source = "legacy_excess_liquidity"
+    else:
+        margin_cushion = float(portfolio.account_equity) - maintenance_margin
+        margin_cushion_source = maintenance_margin_source
+
+    return {
+        "cash": cash,
+        "cash_source": cash_source,
+        "margin_debit": margin_debit,
+        "margin_debit_source": margin_debit_source,
+        "maintenance_margin": maintenance_margin,
+        "maintenance_margin_source": maintenance_margin_source,
+        "margin_cushion": margin_cushion,
+        "margin_cushion_source": margin_cushion_source,
+        "account_fields_estimated": estimate_cash_margin or maintenance_margin_source.startswith("estimated"),
+    }
 
 
-def _margin_buy_budget(portfolio: Portfolio, risk: dict) -> tuple[float | None, list[str]]:
-    cushion, source = _margin_cushion(portfolio)
+def _margin_buy_budget(account_fields: dict, equity: float, risk: dict) -> tuple[float | None, list[str]]:
+    cushion = account_fields.get("margin_cushion")
+    source = account_fields.get("margin_cushion_source")
     if cushion is None:
         return None, []
-    min_cushion = float(risk.get("min_margin_cushion", 50000.0))
+    min_cushion = _effective_min_margin_cushion(equity, risk)
     haircut = max(0.01, float(risk.get("margin_buy_power_haircut", 0.5)))
     surplus = float(cushion) - min_cushion
     if surplus <= 0:
@@ -2638,9 +2691,10 @@ def build_trade_plan(
 
     current_values = {symbol: _position_value(portfolio, snapshots, symbol) for symbol in symbols}
     current_gross_value = sum(value for value in current_values.values() if value > 0)
+    account_fields = _resolved_account_fields(portfolio, current_gross_value, risk)
     max_gross_value = equity * float(risk["max_gross_exposure"])
     remaining_buy_value = max(0.0, max_gross_value - current_gross_value)
-    margin_buy_budget, margin_reasons = _margin_buy_budget(portfolio, risk)
+    margin_buy_budget, margin_reasons = _margin_buy_budget(account_fields, equity, risk)
     if margin_buy_budget is not None:
         remaining_buy_value = min(remaining_buy_value, margin_buy_budget)
     min_trade_value = float(risk["min_trade_value"])
@@ -2935,10 +2989,11 @@ def build_trade_plan(
 
     planned_buy_notional = sum(float(order.get("notional", 0.0)) for order in orders if order.get("side") == "buy")
     planned_sell_notional = sum(float(order.get("notional", 0.0)) for order in orders if order.get("side") == "sell")
-    min_cushion = float(risk.get("min_margin_cushion", 50000.0))
+    min_cushion = _effective_min_margin_cushion(equity, risk)
     haircut = max(0.01, float(risk.get("margin_buy_power_haircut", 0.5)))
     stress_drop = float(risk.get("stress_drop_pct", 0.05))
-    margin_cushion, margin_cushion_source = _margin_cushion(portfolio)
+    margin_cushion = account_fields.get("margin_cushion")
+    margin_cushion_source = account_fields.get("margin_cushion_source")
     estimated_margin_cushion_after_buys = None
     if margin_cushion is not None:
         estimated_margin_cushion_after_buys = float(margin_cushion) - planned_buy_notional * haircut
@@ -2951,12 +3006,16 @@ def build_trade_plan(
         "asof": datetime.now(timezone.utc).isoformat(),
         "portfolio": {
             "account_equity": round(equity, 2),
-            "cash": round(portfolio.cash, 2),
-            "margin_debit": round(portfolio.margin_debit, 2),
-            "maintenance_margin": None if portfolio.maintenance_margin is None else round(float(portfolio.maintenance_margin), 2),
+            "cash": round(float(account_fields.get("cash") or 0.0), 2),
+            "cash_source": account_fields.get("cash_source"),
+            "margin_debit": round(float(account_fields.get("margin_debit") or 0.0), 2),
+            "margin_debit_source": account_fields.get("margin_debit_source"),
+            "maintenance_margin": round(float(account_fields.get("maintenance_margin") or 0.0), 2),
+            "maintenance_margin_source": account_fields.get("maintenance_margin_source"),
             "excess_liquidity": None if portfolio.excess_liquidity is None else round(float(portfolio.excess_liquidity), 2),
             "margin_cushion": None if margin_cushion is None else round(float(margin_cushion), 2),
             "margin_cushion_source": margin_cushion_source,
+            "account_fields_estimated": bool(account_fields.get("account_fields_estimated")),
             "target_gross_hint": portfolio.target_gross_hint,
             "current_gross_value": round(current_gross_value, 2),
             "current_gross_exposure": round(current_gross_value / equity, 4) if equity else 0.0,

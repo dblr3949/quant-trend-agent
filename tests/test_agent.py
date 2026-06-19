@@ -17,7 +17,7 @@ from quant_trend.agent import (
 )
 from quant_trend.market_data import IntradayBar, Quote
 from quant_trend.models import Bar
-from quant_trend.portfolio import Portfolio, Position
+from quant_trend.portfolio import Portfolio, Position, portfolio_from_dict
 from quant_trend.prompt_overlay import overlay_from_prompt
 
 
@@ -416,6 +416,48 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(plan["portfolio"]["margin_buy_budget"], 0.0)
             self.assertEqual(plan["portfolio"]["margin_cushion"], 20000.0)
             self.assertIn("buy_blocked", plan["positions"][0]["reason"])
+
+    def test_missing_account_cash_fields_are_estimated_from_positions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = {}
+            for symbol, price in {"MU": 100, "SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
+                latest[symbol] = write_bars(tmp, symbol, price)
+            asof = datetime.now(timezone.utc).isoformat()
+            quotes = {symbol: Quote(symbol, price, asof=asof, source="test") for symbol, price in latest.items()}
+            portfolio = portfolio_from_dict(
+                {
+                    "account_equity": 100000,
+                    "cash": None,
+                    "margin_debit": None,
+                    "positions": {"MU": {"shares": 1200, "avg_cost": 100}},
+                }
+            )
+            config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
+
+            plan = build_trade_plan(portfolio, quotes, config, {"symbols": {"MU": {"prompt_flags": ["explicit_test_symbol"]}}}, tmp)
+
+            gross_value = plan["portfolio"]["current_gross_value"]
+            self.assertAlmostEqual(plan["portfolio"]["cash"], 100000 - gross_value, places=2)
+            self.assertAlmostEqual(plan["portfolio"]["margin_debit"], max(0.0, gross_value - 100000), places=2)
+            self.assertEqual(plan["portfolio"]["cash_source"], "estimated_from_positions")
+            self.assertEqual(plan["portfolio"]["margin_debit_source"], "estimated_from_positions")
+            self.assertEqual(plan["portfolio"]["maintenance_margin_source"], "estimated_from_gross_exposure")
+            self.assertTrue(plan["portfolio"]["account_fields_estimated"])
+
+    def test_zero_cash_and_margin_are_estimated_when_inconsistent_with_holdings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            latest = {}
+            for symbol, price in {"MU": 100, "SPY": 500, "SMH": 250, "SOXX": 220, "^VIX": 16}.items():
+                latest[symbol] = write_bars(tmp, symbol, price)
+            asof = datetime.now(timezone.utc).isoformat()
+            quotes = {symbol: Quote(symbol, price, asof=asof, source="test") for symbol, price in latest.items()}
+            portfolio = Portfolio(account_equity=100000, cash=0, margin_debit=0, positions={"MU": Position("MU", 1200, 100)})
+            config = {**DEFAULT_CONFIG, "symbols": ["MU"], "base_target_weights": {"MU": 1.0}}
+
+            plan = build_trade_plan(portfolio, quotes, config, {"symbols": {"MU": {"prompt_flags": ["explicit_test_symbol"]}}}, tmp)
+
+            self.assertEqual(plan["portfolio"]["cash_source"], "estimated_from_positions")
+            self.assertGreater(plan["portfolio"]["margin_debit"], 0)
 
     def test_limit_price_prefers_patient_lower_buy_when_only_intraday_support(self):
         snapshot = TechnicalSnapshot(

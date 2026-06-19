@@ -438,7 +438,12 @@ function emptyPortfolio() {
   for (const symbol of defaultSymbols) {
     positions[symbol] = { shares: 0, avg_cost: "" };
   }
-  return { account_equity: "", cash: 0, margin_debit: 0, maintenance_margin: "", target_gross_hint: "", positions };
+  return { account_equity: "", cash: "", margin_debit: "", maintenance_margin: "", target_gross_hint: "", positions };
+}
+
+function optionalNumberInput(id) {
+  const value = $(id).value;
+  return value === "" ? null : Number(value);
 }
 
 function currentPortfolioFromForm() {
@@ -454,10 +459,10 @@ function currentPortfolioFromForm() {
   }
   return {
     account_equity: Number($("accountEquity").value || 0),
-    cash: Number($("cash").value || 0),
-    margin_debit: Number($("marginDebit").value || 0),
-    maintenance_margin: $("maintenanceMargin").value === "" ? null : Number($("maintenanceMargin").value),
-    target_gross_hint: $("targetGrossHint").value === "" ? null : Number($("targetGrossHint").value),
+    cash: optionalNumberInput("cash"),
+    margin_debit: optionalNumberInput("marginDebit"),
+    maintenance_margin: optionalNumberInput("maintenanceMargin"),
+    target_gross_hint: optionalNumberInput("targetGrossHint"),
     positions,
   };
 }
@@ -465,8 +470,8 @@ function currentPortfolioFromForm() {
 function setPortfolioForm(portfolio) {
   const data = portfolio || emptyPortfolio();
   $("accountEquity").value = data.account_equity ?? "";
-  $("cash").value = data.cash ?? 0;
-  $("marginDebit").value = data.margin_debit ?? 0;
+  $("cash").value = data.cash ?? "";
+  $("marginDebit").value = data.margin_debit ?? "";
   $("maintenanceMargin").value = data.maintenance_margin ?? "";
   $("targetGrossHint").value = data.target_gross_hint ?? "";
   const body = $("positionsBody");
@@ -2139,7 +2144,12 @@ function renderRun(plan) {
   $("metricOrders").textContent = String(plan.orders?.length || 0);
   const maintenance = plan.portfolio?.maintenance_margin;
   const cushion = plan.portfolio?.margin_cushion;
-  $("metricMargin").textContent = maintenance === null || maintenance === undefined ? "-" : `${fmtMoney(maintenance)} / ${fmtMoney(cushion)}`;
+  const marginSource = String(plan.portfolio?.maintenance_margin_source || "");
+  const marginEstimated = marginSource.startsWith("estimated");
+  $("metricMargin").textContent = maintenance === null || maintenance === undefined ? "-" : `${fmtMoney(maintenance)} / ${fmtMoney(cushion)}${marginEstimated ? " · 估算" : ""}`;
+  $("metricMargin").title = marginEstimated
+    ? "维持保证金为系统按当前持仓市值粗估；现金/融资留空时也会自动估算。"
+    : "维持保证金来自你的输入。";
   renderExecutiveSummary(plan.executive_summary || fallbackExecutiveSummary(plan));
   drawExposure(plan);
   renderMarketRegime(plan);
