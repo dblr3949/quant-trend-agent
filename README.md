@@ -1,6 +1,6 @@
 # Semis Position Agent
 
-当前版本：`v0.5.1`
+当前版本：`v0.5.2`
 
 半导体持仓调仓研究台。系统读取网页里手动维护的 BBAE 持仓、Massive/Polygon 行情、历史日线、当日分钟线、用户本轮调仓 prompt 和本地研究覆盖项，生成中文研究过程、重点总结和人工确认用的挂单建议。
 
@@ -48,7 +48,7 @@ MASSIVE_WS_URL=ws://44.219.45.87:8080/ws
 DASHSCOPE_API_KEY=REPLACE_WITH_DASHSCOPE_KEY
 OPENAI_API_KEY=REPLACE_WITH_OPENAI_KEY
 DEEPSEEK_API_KEY=REPLACE_WITH_DEEPSEEK_KEY
-OPENAI_MODEL=qwen3.7-max
+OPENAI_MODEL=deepseek-chat
 ```
 
 启动本地网页：
@@ -73,7 +73,7 @@ https://quant-trend-agent-production.up.railway.app
 
 版本号定义在 `quant_trend/version.py`。
 
-前端 topbar 会展示当前应用版本，例如 `v0.5.1`。后端接口也会返回版本：
+前端 topbar 会展示当前应用版本，例如 `v0.5.2`。后端接口也会返回版本：
 
 ```bash
 curl https://quant-trend-agent-production.up.railway.app/healthz
@@ -566,7 +566,7 @@ MASSIVE_API_KEY=...
 DASHSCOPE_API_KEY=...
 OPENAI_API_KEY=...
 DEEPSEEK_API_KEY=...
-APP_VERSION=0.5.1
+APP_VERSION=0.5.2
 ```
 
 如果启用多用户数据库，持仓、设置、跑批记录会写入 `/data` 下的持久化数据库或文件。Railway 重新部署不会清空 `/data` volume。

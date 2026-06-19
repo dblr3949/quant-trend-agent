@@ -43,9 +43,13 @@ except ImportError:  # pragma: no cover
 APP_STATE = "state/agent_app_state.json"
 RUNS_DIR = "reports/agent_runs"
 RUN_ID_LENGTH = 22
+DEFAULT_LLM_MODEL = "deepseek-chat"
+ENABLED_LLM_MODELS = {"deepseek-chat", "qwen3.7-max", "deepseek-reasoner"}
+LLM_MODEL_DEFAULT_VERSION = 2
 DEFAULT_SETTINGS = {
     "provider": "massive",
-    "llm_model": "qwen3.7-max",
+    "llm_model": DEFAULT_LLM_MODEL,
+    "llm_model_default_version": LLM_MODEL_DEFAULT_VERSION,
     "refresh_history": True,
     "schedule_enabled": False,
     "massive_rest_url": "http://44.219.45.87:8081",
@@ -66,6 +70,22 @@ DEFAULT_SETTINGS = {
         {"label": "postmarket", "time": "05:10"},
     ],
 }
+
+
+def _normalize_llm_model(value: str | None) -> str:
+    model = str(value or "").strip()
+    return model if model in ENABLED_LLM_MODELS else DEFAULT_LLM_MODEL
+
+
+def _normalize_settings(settings: dict) -> dict:
+    raw_settings = settings or {}
+    legacy_default_version = raw_settings.get("llm_model_default_version")
+    normalized = {**DEFAULT_SETTINGS, **raw_settings}
+    if legacy_default_version != LLM_MODEL_DEFAULT_VERSION and str(normalized.get("llm_model") or "").strip() == "qwen3.7-max":
+        normalized["llm_model"] = DEFAULT_LLM_MODEL
+    normalized["llm_model"] = _normalize_llm_model(normalized.get("llm_model"))
+    normalized["llm_model_default_version"] = LLM_MODEL_DEFAULT_VERSION
+    return normalized
 
 
 def _bar_size_to_yahoo_interval(bar_size: str) -> str:
@@ -281,7 +301,7 @@ class AgentApp:
         else:
             state = _read_json(self.state_path, {})
         state.setdefault("settings", DEFAULT_SETTINGS.copy())
-        state["settings"] = {**DEFAULT_SETTINGS, **state.get("settings", {})}
+        state["settings"] = _normalize_settings(state.get("settings", {}))
         state.setdefault("last_schedule_runs", {})
         if not self.user_store and "portfolio" not in state and self.portfolio_path.exists():
             try:
@@ -786,7 +806,7 @@ class AgentApp:
                 config = load_agent_config(self.config_path)
                 settings = {**state.get("settings", {}), **payload.get("settings", {})}
                 provider = payload.get("provider") or settings.get("provider", "massive")
-                llm_model = str(payload.get("model") or settings.get("llm_model") or "").strip() or None
+                llm_model = _normalize_llm_model(payload.get("model") or settings.get("llm_model"))
                 base_research = load_json(self.research_path)
                 prompt_symbols = extract_prompt_symbols(prompt)
                 symbols = _symbols_for_run(config, portfolio, prompt_symbols=prompt_symbols, research=base_research)
@@ -859,7 +879,7 @@ class AgentApp:
                     "id": run_id,
                     "kind": kind,
                     "provider": provider,
-                    "model": llm_model or os.getenv("OPENAI_MODEL", "qwen3.7-max"),
+                    "model": llm_model or os.getenv("OPENAI_MODEL", DEFAULT_LLM_MODEL),
                     "prompt": prompt,
                     "created_at": _now_iso(),
                 }
@@ -1173,6 +1193,7 @@ def make_handler(app: AgentApp):
                 if path == "/api/settings/save":
                     state = app.load_state(user_id=user_id)
                     state["settings"] = {**state.get("settings", {}), **payload.get("settings", {})}
+                    state["settings"] = _normalize_settings(state["settings"])
                     app.save_state(state, user_id=user_id)
                     self._json({"settings": state["settings"]})
                     return

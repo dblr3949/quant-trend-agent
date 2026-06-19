@@ -169,9 +169,12 @@ function parseSummaryBlocks(text) {
     const symbolLine = line.match(/^(\^?[A-Z][A-Z0-9.]{0,6})[：:]\s*(.*)$/);
     const compactSymbolLine = line.match(/^(\^?[A-Z][A-Z0-9.]{0,6})(?=现价|当前价|价格|：|:)/);
     const sectionLine = line.match(/^(市场指数分析|指数分析|持仓股票分析|持仓分析)[：:]\s*(.*)$/);
+    const overviewLine = line.match(/^(整体市场框架|整体市场|市场框架|市场环境|整体)[：:]\s*(.*)$/);
     if (pendingTitle) {
       blocks.push({ title: pendingTitle, body: line });
       pendingTitle = null;
+    } else if (overviewLine) {
+      blocks.push({ title: "整体市场框架", body: overviewLine[2] || "" });
     } else if (sectionLine) {
       blocks.push({ title: sectionLine[1], body: sectionLine[2] || "" });
     } else if (symbolLine) {
@@ -279,7 +282,7 @@ function toggleMarketDataSettings() {
 function currentSettingsFromForm() {
   return {
     provider: $("provider").value,
-    llm_model: $("llmModel").value || "qwen3.7-max",
+    llm_model: $("llmModel").value || "deepseek-chat",
     refresh_history: $("refreshHistory").checked,
     schedule_enabled: $("scheduleEnabled").checked,
     massive_rest_url: $("massiveRestUrl").value || "http://44.219.45.87:8081",
@@ -1636,7 +1639,8 @@ async function loadState() {
   latestRun = payload.latest_run;
   renderAppVersion(payload.app || {});
   $("provider").value = appState.settings.provider || "massive";
-  $("llmModel").value = appState.settings.llm_model || "qwen3.7-max";
+  $("llmModel").value = appState.settings.llm_model || "deepseek-chat";
+  if (!$("llmModel").value) $("llmModel").value = "deepseek-chat";
   $("refreshHistory").checked = appState.settings.refresh_history !== false;
   $("scheduleEnabled").checked = !!appState.settings.schedule_enabled;
   $("massiveRestUrl").value = appState.settings.massive_rest_url || "http://44.219.45.87:8081";

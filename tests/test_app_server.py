@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from quant_trend.agent import _current_market_snapshot_label
-from quant_trend.app_server import DEFAULT_SETTINGS, AgentApp, _latest_expected_us_daily_date, _symbols_for_run
+from quant_trend.app_server import DEFAULT_SETTINGS, AgentApp, _latest_expected_us_daily_date, _normalize_llm_model, _normalize_settings, _symbols_for_run
 from quant_trend.market_data import Quote
 from quant_trend.portfolio import Portfolio, Position
 from quant_trend.user_store import UserStore
@@ -16,6 +16,18 @@ from quant_trend.user_store import UserStore
 class AppServerTests(unittest.TestCase):
     def test_default_provider_is_massive(self):
         self.assertEqual(DEFAULT_SETTINGS["provider"], "massive")
+
+    def test_default_model_is_deepseek_and_gpt55_is_disabled(self):
+        self.assertEqual(DEFAULT_SETTINGS["llm_model"], "deepseek-chat")
+        self.assertEqual(_normalize_llm_model("gpt-5.5"), "deepseek-chat")
+        self.assertEqual(_normalize_llm_model("qwen3.7-max"), "qwen3.7-max")
+
+    def test_legacy_qwen_default_migrates_to_deepseek_once(self):
+        migrated = _normalize_settings({"llm_model": "qwen3.7-max"})
+        explicit_qwen = _normalize_settings({"llm_model": "qwen3.7-max", "llm_model_default_version": DEFAULT_SETTINGS["llm_model_default_version"]})
+
+        self.assertEqual(migrated["llm_model"], "deepseek-chat")
+        self.assertEqual(explicit_qwen["llm_model"], "qwen3.7-max")
 
     def test_app_data_dir_moves_mutable_state(self):
         with tempfile.TemporaryDirectory() as tmp:

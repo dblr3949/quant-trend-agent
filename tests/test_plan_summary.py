@@ -177,6 +177,37 @@ class PlanSummaryTests(unittest.TestCase):
             else:
                 os.environ["OPENAI_API_KEY"] = old_key
 
+    def test_markdown_headings_are_normalized_to_compact_summary_style(self):
+        old_key = os.environ.get("OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = "test-openai-key"
+        try:
+            plan = {
+                "regime": {"label": "risk_on", "score": 2, "score_range": {"min": -10, "max": 10, "percentile": 60}},
+                "portfolio": {"current_gross_exposure": 1.2},
+                "orders": [],
+                "technical_analysis": {"MU": {"score": 2, "score_range": {"min": -6, "max": 6, "percentile": 67}, "supports": [], "resistances": []}},
+                "positions": [{"symbol": "MU", "price": 100, "current_weight": 0.3, "target_weight": 0.3, "action": "hold", "reason": "inside_rebalance_band"}],
+            }
+
+            with patch(
+                "quant_trend.plan_summary._call_openai_summary",
+                return_value={
+                    "model": "deepseek-chat",
+                    "text": "### 整体市场框架\n当前市场风险偏多。\n### MU\nMU 现价100，暂不动作。",
+                    "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 10, "reasoning_tokens": 0, "total_tokens": 20},
+                },
+            ):
+                summary = build_executive_summary(plan)
+
+            self.assertIn("整体市场框架：当前市场风险偏多。", summary["text"])
+            self.assertIn("MU：现价100，暂不动作。", summary["text"])
+            self.assertNotIn("###", summary["text"])
+        finally:
+            if old_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = old_key
+
 
 if __name__ == "__main__":
     unittest.main()

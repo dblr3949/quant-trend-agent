@@ -275,6 +275,39 @@ def _clip_paragraphs(text: str, limit: int | None = None) -> str:
     return "\n".join(selected)[:limit]
 
 
+def _strip_repeated_title(title: str, body: str) -> str:
+    cleaned = str(body or "").strip()
+    normalized_title = str(title or "").strip()
+    if not normalized_title or not cleaned:
+        return cleaned
+    if cleaned.upper().startswith(normalized_title.upper()):
+        cleaned = cleaned[len(normalized_title):].lstrip(" ：:，,。.-")
+    return cleaned
+
+
+def _normalize_summary_style(text: str) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return str(text or "")
+    normalized: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        heading = re.match(r"^#{1,6}\s*(.+?)\s*$", line)
+        bracket_heading = re.match(r"^【([^】]+)】\s*$", line)
+        if heading or bracket_heading:
+            title = (heading.group(1) if heading else bracket_heading.group(1)).strip(" ：:")
+            body = ""
+            if index + 1 < len(lines) and not re.match(r"^(?:#{1,6}\s*|【[^】]+】\s*$)", lines[index + 1]):
+                body = _strip_repeated_title(title, lines[index + 1])
+                index += 1
+            normalized.append(f"{title}：{body}".strip())
+        else:
+            normalized.append(line)
+        index += 1
+    return "\n".join(normalized)
+
+
 def _missing_symbols(text: str, symbols: list[str]) -> list[str]:
     upper = str(text or "").upper()
     return [symbol for symbol in symbols if symbol and symbol not in upper]
@@ -359,7 +392,7 @@ def _combine_usage(items: list[dict | None]) -> dict:
 
 
 def _call_openai_summary(compact: dict, *, effort_override: str | None = None, format_retry: bool = False, model: str | None = None) -> dict | None:
-    model = model or os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "qwen3.7-max")
+    model = model or os.getenv("OPENAI_SUMMARY_MODEL") or os.getenv("OPENAI_MODEL", "deepseek-chat")
     target = resolve_llm_target(model)
     api_key = os.getenv(target["api_key_env"])
     if not api_key:
@@ -369,8 +402,12 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None, f
     system = (
         "你是美股半导体仓位管理助手。只做中文摘要，不给投资保证。"
         "必须基于输入数据，每只股票一段话；必须覆盖输入positions里的全部symbol。"
+        "输出采用纯文本自然段，严禁 Markdown 标题、项目符号、表格、编号列表和代码块。"
+        "格式必须是每行一个段落：第一行“整体市场框架：...”，后续每行“SYMBOL：...”。"
+        "不要写“### 整体市场框架”或“### SYMBOL”；不要把标题单独占一行。"
+        "风格参考：整体市场框架：市场环境为 risk_on，市场分 +8.45 / -10~+10 · 尺位92%，SPY 现价...；AAOI：现价...，建议...，关键支撑...，压力...。"
         "开头必须先写一段整体市场框架，明确覆盖 SPY、SMH、SOXX、^VIX；缺数据就写缺数据。"
-        "每段可以较完整，但要分段清楚；不要因为篇幅省略任何持仓股票。"
+        "每段可以较完整但要紧凑，像交易台晨会摘要；不要因为篇幅省略任何持仓股票。"
         "优先解释近期量价技术面：支撑、压力、Volume Profile、POC/VAH/VAL/HVN/LVN、筹码占比、自动锚定VWAP、高量区、20日量比、日内趋势、多周期风险调整动量、区间波动率和订单流/VPIN近似。"
         "^VIX 必须按 volatility_analysis 里的绝对水平、252日分位、126日Z-score、5日变化和20日均值偏离解释，不要写股票式成交量/POC。"
         "如存在 llm_limit_decisions 或 order.llm_limit_decision，要说明模型选择的候选点位依据。"
@@ -481,6 +518,7 @@ def build_executive_summary(plan: dict, model: str | None = None) -> dict:
             fallback["model"] = model
             fallback["usage"] = usage
         return fallback
+    text = _normalize_summary_style(str(text))
     if _has_denominator_score_format(text):
         try:
             retry = _call_openai_summary(compact, format_retry=True, model=model)
@@ -490,6 +528,7 @@ def build_executive_summary(plan: dict, model: str | None = None) -> dict:
             attempts.append(retry)
             combined_usage = _combine_usage([item.get("usage") for item in attempts if isinstance(item, dict)])
             retry_text = str(retry.get("text") or "") if isinstance(retry, dict) else str(retry or "")
+            retry_text = _normalize_summary_style(retry_text)
             if retry_text and not _has_denominator_score_format(retry_text):
                 text = retry_text
                 usage = combined_usage

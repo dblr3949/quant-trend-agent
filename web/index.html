@@ -47,12 +47,11 @@
             <option value="alpaca">Alpaca 行情</option>
           </select>
         </label>
-        <label class="field compact" title="点位复核与重点总结使用的模型。默认 Qwen3.7-Max；DeepSeek 需在 config/openai.env 填 DEEPSEEK_API_KEY。">
-          <span>模型 <span class="hint" title="决定两段模型分析（点位复核、重点总结）用哪个模型。默认 Qwen3.7-Max。">?</span></span>
+        <label class="field compact" title="点位复核与重点总结使用的模型。默认 DeepSeek V4 Pro；Qwen3.7-Max 作为第二选择。">
+          <span>模型 <span class="hint" title="决定两段模型分析（点位复核、重点总结）用哪个模型。GPT5.5 已从前端禁用。">?</span></span>
           <select id="llmModel">
-            <option value="qwen3.7-max">Qwen3.7-Max（默认·百炼）</option>
-            <option value="gpt-5.5">OpenAI gpt-5.5</option>
-            <option value="deepseek-chat">DeepSeek V4（非思考·点位稳）</option>
+            <option value="deepseek-chat">DeepSeek V4 Pro（默认）</option>
+            <option value="qwen3.7-max">Qwen3.7-Max（第二选择·百炼）</option>
             <option value="deepseek-reasoner">DeepSeek V4（思考·更深）</option>
           </select>
         </label>
