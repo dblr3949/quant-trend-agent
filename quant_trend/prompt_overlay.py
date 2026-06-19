@@ -398,7 +398,7 @@ def _merge_prompt_parse(rule_overlay: dict, llm_overlay: dict, parser_meta: dict
 
 
 def _call_llm_prompt_overlay(prompt: str, symbols: list[str], model: str | None = None) -> dict | None:
-    model = model or os.getenv("OPENAI_PROMPT_MODEL") or os.getenv("OPENAI_MODEL", "deepseek-chat")
+    model = model or os.getenv("OPENAI_PROMPT_MODEL") or os.getenv("OPENAI_MODEL", "deepseek-v4-pro")
     target = resolve_llm_target(model)
     api_key = os.getenv(target["api_key_env"])
     if not api_key:

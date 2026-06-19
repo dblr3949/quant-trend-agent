@@ -18,16 +18,26 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(DEFAULT_SETTINGS["provider"], "massive")
 
     def test_default_model_is_deepseek_and_gpt55_is_disabled(self):
-        self.assertEqual(DEFAULT_SETTINGS["llm_model"], "deepseek-chat")
-        self.assertEqual(_normalize_llm_model("gpt-5.5"), "deepseek-chat")
+        self.assertEqual(DEFAULT_SETTINGS["llm_model"], "deepseek-v4-pro")
+        self.assertEqual(_normalize_llm_model("gpt-5.5"), "deepseek-v4-pro")
+        self.assertEqual(_normalize_llm_model("deepseek-chat"), "deepseek-v4-flash")
+        self.assertEqual(_normalize_llm_model("deepseek-reasoner"), "deepseek-v4-flash")
+        self.assertEqual(_normalize_llm_model("deepseek-v4-flash"), "deepseek-v4-flash")
         self.assertEqual(_normalize_llm_model("qwen3.7-max"), "qwen3.7-max")
 
     def test_legacy_qwen_default_migrates_to_deepseek_once(self):
         migrated = _normalize_settings({"llm_model": "qwen3.7-max"})
         explicit_qwen = _normalize_settings({"llm_model": "qwen3.7-max", "llm_model_default_version": DEFAULT_SETTINGS["llm_model_default_version"]})
 
-        self.assertEqual(migrated["llm_model"], "deepseek-chat")
+        self.assertEqual(migrated["llm_model"], "deepseek-v4-pro")
         self.assertEqual(explicit_qwen["llm_model"], "qwen3.7-max")
+
+    def test_legacy_deepseek_default_migrates_to_v4_pro(self):
+        migrated = _normalize_settings({"llm_model": "deepseek-chat", "llm_model_default_version": 2})
+        explicit_flash = _normalize_settings({"llm_model": "deepseek-v4-flash", "llm_model_default_version": DEFAULT_SETTINGS["llm_model_default_version"]})
+
+        self.assertEqual(migrated["llm_model"], "deepseek-v4-pro")
+        self.assertEqual(explicit_flash["llm_model"], "deepseek-v4-flash")
 
     def test_app_data_dir_moves_mutable_state(self):
         with tempfile.TemporaryDirectory() as tmp:

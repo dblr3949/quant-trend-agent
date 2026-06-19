@@ -43,9 +43,13 @@ except ImportError:  # pragma: no cover
 APP_STATE = "state/agent_app_state.json"
 RUNS_DIR = "reports/agent_runs"
 RUN_ID_LENGTH = 22
-DEFAULT_LLM_MODEL = "deepseek-chat"
-ENABLED_LLM_MODELS = {"deepseek-chat", "qwen3.7-max", "deepseek-reasoner"}
-LLM_MODEL_DEFAULT_VERSION = 2
+DEFAULT_LLM_MODEL = "deepseek-v4-pro"
+ENABLED_LLM_MODELS = {"deepseek-v4-pro", "deepseek-v4-flash", "qwen3.7-max"}
+LEGACY_LLM_MODEL_ALIASES = {
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-flash",
+}
+LLM_MODEL_DEFAULT_VERSION = 3
 DEFAULT_SETTINGS = {
     "provider": "massive",
     "llm_model": DEFAULT_LLM_MODEL,
@@ -74,6 +78,7 @@ DEFAULT_SETTINGS = {
 
 def _normalize_llm_model(value: str | None) -> str:
     model = str(value or "").strip()
+    model = LEGACY_LLM_MODEL_ALIASES.get(model, model)
     return model if model in ENABLED_LLM_MODELS else DEFAULT_LLM_MODEL
 
 
@@ -81,7 +86,8 @@ def _normalize_settings(settings: dict) -> dict:
     raw_settings = settings or {}
     legacy_default_version = raw_settings.get("llm_model_default_version")
     normalized = {**DEFAULT_SETTINGS, **raw_settings}
-    if legacy_default_version != LLM_MODEL_DEFAULT_VERSION and str(normalized.get("llm_model") or "").strip() == "qwen3.7-max":
+    old_default_models = {"deepseek-chat", "deepseek-reasoner", "qwen3.7-max"}
+    if legacy_default_version != LLM_MODEL_DEFAULT_VERSION and str(normalized.get("llm_model") or "").strip() in old_default_models:
         normalized["llm_model"] = DEFAULT_LLM_MODEL
     normalized["llm_model"] = _normalize_llm_model(normalized.get("llm_model"))
     normalized["llm_model_default_version"] = LLM_MODEL_DEFAULT_VERSION

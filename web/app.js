@@ -282,7 +282,7 @@ function toggleMarketDataSettings() {
 function currentSettingsFromForm() {
   return {
     provider: $("provider").value,
-    llm_model: $("llmModel").value || "deepseek-chat",
+    llm_model: $("llmModel").value || "deepseek-v4-pro",
     refresh_history: $("refreshHistory").checked,
     schedule_enabled: $("scheduleEnabled").checked,
     massive_rest_url: $("massiveRestUrl").value || "http://44.219.45.87:8081",
@@ -1647,8 +1647,8 @@ async function loadState() {
   latestRun = payload.latest_run;
   renderAppVersion(payload.app || {});
   $("provider").value = appState.settings.provider || "massive";
-  $("llmModel").value = appState.settings.llm_model || "deepseek-chat";
-  if (!$("llmModel").value) $("llmModel").value = "deepseek-chat";
+  $("llmModel").value = appState.settings.llm_model || "deepseek-v4-pro";
+  if (!$("llmModel").value) $("llmModel").value = "deepseek-v4-pro";
   $("refreshHistory").checked = appState.settings.refresh_history !== false;
   $("scheduleEnabled").checked = !!appState.settings.schedule_enabled;
   $("massiveRestUrl").value = appState.settings.massive_rest_url || "http://44.219.45.87:8081";

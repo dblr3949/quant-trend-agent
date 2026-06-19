@@ -316,7 +316,7 @@ def _openai_json_request(request: Request, timeout: float, context: ssl.SSLConte
 
 
 def _call_openai_decisions(compact: dict, model: str | None = None) -> dict | None:
-    model = model or os.getenv("OPENAI_DECISION_MODEL") or os.getenv("OPENAI_MODEL", "deepseek-chat")
+    model = model or os.getenv("OPENAI_DECISION_MODEL") or os.getenv("OPENAI_MODEL", "deepseek-v4-pro")
     target = resolve_llm_target(model)
     api_key = os.getenv(target["api_key_env"])
     if not api_key or not compact.get("orders"):

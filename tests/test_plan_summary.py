@@ -192,7 +192,7 @@ class PlanSummaryTests(unittest.TestCase):
             with patch(
                 "quant_trend.plan_summary._call_openai_summary",
                 return_value={
-                    "model": "deepseek-chat",
+                    "model": "deepseek-v4-pro",
                     "text": "### 整体市场框架\n当前市场风险偏多。\n### MU\nMU 现价100，暂不动作。",
                     "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 10, "reasoning_tokens": 0, "total_tokens": 20},
                 },
