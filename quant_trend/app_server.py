@@ -910,7 +910,7 @@ class AgentApp:
                     )
                 else:
                     self._progress_step("LLM 点位复核跳过", "未配置 LLM 或本轮没有候选挂单，保留后端确定性点位。", {"采用点位": 0})
-                self._progress_step("生成重点总结", "把量价点位、当日趋势、仓位约束和弱覆盖因子交给 LLM，生成 500 字内中文摘要。", {"状态": "开始"})
+                self._progress_step("生成重点总结", "把量价点位、当日趋势、仓位约束和弱覆盖因子交给 LLM，生成交易台中文摘要。", {"状态": "开始"})
                 plan["executive_summary"] = build_executive_summary(plan, model=llm_model)
                 plan["llm_usage"] = _collect_llm_usage(plan)
                 self._progress_step("保存记录", f"准备保存到 {path.name}。", {"建议单数": len(plan.get("orders", []))})

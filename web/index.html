@@ -73,7 +73,7 @@
     <main id="appWorkspace" class="workspace" hidden>
       <section id="massiveSettings" class="ibkr-panel">
         <div class="section-head">
-          <h2>Massive/Polygon 行情设置</h2>
+          <h2>Massive/Polygon 行情设置 <span class="hint" tabindex="0" role="button" aria-label="Massive行情设置口径" title="默认主行情源。每轮按标的读取快照、日线和最近交易日分钟线；只读行情，不读取账户、不下单。">?</span></h2>
           <span class="pill">默认主行情源 · 只读行情</span>
         </div>
         <p class="safety-note">
@@ -104,7 +104,7 @@
 
       <section id="ibkrSettings" class="ibkr-panel" hidden>
         <div class="section-head">
-          <h2>IBKR 行情设置</h2>
+          <h2>IBKR 行情设置 <span class="hint" tabindex="0" role="button" aria-label="IBKR行情设置口径" title="备用只读行情源。只调用行情和历史行情接口，不读取 IBKR 持仓、账户、订单或成交。">?</span></h2>
           <span class="pill">只读行情，不读持仓/订单，不下单</span>
         </div>
         <p class="safety-note">
@@ -148,7 +148,7 @@
 
       <section id="intradaySettings" class="ibkr-panel">
         <div class="section-head">
-          <h2>当日行情</h2>
+          <h2>当日行情 <span class="hint" tabindex="0" role="button" aria-label="当日行情口径" title="用于捕捉开盘至今的趋势、VWAP、近30分钟斜率、日内区间位置和量能。收盘/盘后会展示最近一个有分钟线的美股交易日。">?</span></h2>
           <span class="pill" title="用于捕捉开盘至当前的趋势，不参与任何自动下单。">分钟线评分</span>
         </div>
         <div class="ibkr-grid">
@@ -178,7 +178,7 @@
 
       <section class="portfolio-panel">
         <div class="section-head">
-          <h2>当前持仓</h2>
+          <h2>当前持仓 <span class="hint" tabindex="0" role="button" aria-label="当前持仓口径" title="账户净值是必填。现金、融资、维持保证金可留空，系统会按当前持仓市值粗估；目标杠杆可留空，留空由市况自动判断。">?</span></h2>
           <div class="button-row">
             <button id="addRowBtn" type="button">加一行</button>
             <button id="savePortfolioBtn" type="button">保存持仓</button>
@@ -204,7 +204,7 @@
               <input id="maintenanceMargin" type="number" step="0.01" placeholder="留空自动估算" />
             </label>
             <label class="field" title="可留空。留空时按市场状态自动生成目标杠杆；填写后也只是弱约束。">
-              <span>目标杠杆 <span class="hint" title="例如 1.25；只是偏好，不是硬命令；更激进会被市场/风控截断。">?</span></span>
+              <span>目标杠杆 <span class="hint" title="留空时：risk_on 1.65x、neutral 1.25x、risk_off 0.85x。你填得更保守会直接采用；更激进会按市况和最大杠杆限幅。">?</span></span>
               <input id="targetGrossHint" type="number" step="0.01" min="0" placeholder="留空自动判断" />
             </label>
           </div>
@@ -250,7 +250,7 @@
 
       <aside class="history-panel">
         <div class="section-head">
-          <h2>跑批记录</h2>
+          <h2>跑批记录 <span class="hint" tabindex="0" role="button" aria-label="跑批记录口径" title="每次生成都会保存完整输入、行情快照、指标、LLM 输出和最终建议，点击记录可回看当时版本。">?</span></h2>
           <button id="reloadBtn" type="button">刷新</button>
         </div>
         <div id="historyList" class="history-list"></div>
@@ -258,13 +258,13 @@
 
       <section class="result-panel">
         <div class="section-head">
-          <h2>最新建议</h2>
+          <h2>最新建议 <span class="hint" tabindex="0" role="button" aria-label="最新建议口径" title="从行情、指数状态、个股量价、账户杠杆、你的本次想法和 LLM 复核合成。页面建议只用于人工判断，不会自动下单。">?</span></h2>
           <span id="latestRunTag" class="pill">暂无记录</span>
         </div>
 
         <section class="summary-card">
           <div class="summary-head">
-            <h3>重点总结</h3>
+            <h3>重点总结 <span class="hint" tabindex="0" role="button" aria-label="重点总结口径" title="LLM 读取市场状态、个股量价、支撑压力、价梯、仓位变化、风控提示和你的 prompt 后生成；不直接决定账户数据。">?</span></h3>
             <span id="summarySource" class="pill">等待生成</span>
           </div>
           <div id="executiveSummary" class="executive-summary muted">暂无总结</div>
@@ -272,28 +272,28 @@
 
         <div class="metrics">
           <div>
-            <span>市场状态</span>
+            <span>市场状态 <span class="hint" tabindex="0" role="button" aria-label="市场状态口径" title="SPY/SMH/SOXX 按均线和当日趋势加减分，^VIX 按绝对值、历史分位、Z-score、5日变化和均值偏离计分。总分 >=4 为 risk_on，<=-2 为 risk_off。">?</span></span>
             <strong id="metricRegime">-</strong>
           </div>
           <div>
-            <span>当前杠杆</span>
+            <span>当前杠杆 <span class="hint" tabindex="0" role="button" aria-label="当前杠杆口径" title="当前持仓总市值 / 账户净值。目标杠杆由市况自动生成，你填写的目标只作为弱约束。">?</span></span>
             <strong id="metricGross">-</strong>
           </div>
           <div>
-            <span>建议单数</span>
+            <span>建议单数 <span class="hint" tabindex="0" role="button" aria-label="建议单数口径" title="达到最小交易金额和再平衡阈值，并通过风控、持仓约束和 LLM/本地点位复核后留下的主建议单数量。">?</span></span>
             <strong id="metricOrders">-</strong>
           </div>
           <div>
-            <span>维持/安全垫</span>
+            <span>维持/安全垫 <span class="hint" tabindex="0" role="button" aria-label="维持保证金口径" title="显示维持保证金 / 净值扣除维持保证金后的安全垫。维持保证金留空时按持仓市值约30%粗估。">?</span></span>
             <strong id="metricMargin">-</strong>
           </div>
         </div>
         <div id="exposureGauge" class="exposure-gauge"></div>
 
-        <h3>指数技术面拆解</h3>
+        <h3>指数技术面拆解 <span class="hint" tabindex="0" role="button" aria-label="指数技术面口径" title="展示 SPY、SMH、SOXX 与 ^VIX 对市场状态的贡献。指数趋势会影响买入折价、卖出溢价和整体风险预算。">?</span></h3>
         <div id="marketRegimeBreakdown" class="market-regime-breakdown"></div>
 
-        <h3>建议挂单</h3>
+        <h3>建议挂单 <span class="hint" tabindex="0" role="button" aria-label="建议挂单口径" title="主建议来自目标仓位差额和风控预算；限价从候选支撑/压力/POC/VAH/VAL/HVN/LVN/VWAP 等点位中选择。参考价梯是替代拆单方案，不和主建议叠加。">?</span></h3>
         <p class="section-note">上方表格给出主建议单；每行里的参考价梯是把同一笔建议拆成 2-3 档的替代方案，不和主建议单叠加。</p>
         <div id="tradeGroups" class="trade-groups"></div>
         <div class="table-wrap">
@@ -314,16 +314,16 @@
           </table>
         </div>
 
-        <h3>近期量价点位</h3>
+        <h3>近期量价点位 <span class="hint" tabindex="0" role="button" aria-label="近期量价点位口径" title="按多窗口日线、当日分钟线和成交分布生成支撑/压力。重点看 POC、VAH/VAL、HVN/LVN、自动锚定VWAP、筹码占比、成交占比和共振。">?</span></h3>
         <div id="technicalAnalysis" class="technical-analysis"></div>
 
-        <h3>研究过程</h3>
+        <h3>研究过程 <span class="hint" tabindex="0" role="button" aria-label="研究过程口径" title="按取数、指标、量价结构、仓位杠杆、你的 prompt、LLM 复核六步展示本轮计算链路。每个评分都带范围或分位。">?</span></h3>
         <div id="researchProcess" class="research-process"></div>
 
-        <h3>当日趋势</h3>
+        <h3>当日趋势 <span class="hint" tabindex="0" role="button" aria-label="当日趋势口径" title="使用最近交易日分钟线计算 VWAP、近30分钟方向、开盘至今涨跌、日内位置和量能，只作为短线辅助，不替代历史支撑压力。">?</span></h3>
         <div id="intradaySummary" class="intraday-summary"></div>
 
-        <h3>持仓差异</h3>
+        <h3>持仓差异 <span class="hint" tabindex="0" role="button" aria-label="持仓差异口径" title="显示当前市值权重、目标权重和差额。目标权重先由基准权重和各类乘数生成，再归一到目标总杠杆。">?</span></h3>
         <div class="table-wrap compact-table">
           <table>
             <thead>
