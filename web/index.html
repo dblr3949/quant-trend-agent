@@ -47,12 +47,12 @@
             <option value="alpaca">Alpaca 行情</option>
           </select>
         </label>
-        <label class="field compact" title="点位复核与重点总结使用的模型。默认 DeepSeek V4 Pro；DeepSeek V4 Flash 更省钱更快。">
+        <label class="field compact" title="点位复核与重点总结使用的模型。默认 DeepSeek V4 Pro；DeepSeek V4 Flash 更轻量。">
           <span>模型 <span class="hint" title="决定两段模型分析（点位复核、重点总结）用哪个模型。旧 deepseek-chat/reasoner 已从前端隐藏。">?</span></span>
           <select id="llmModel">
             <option value="deepseek-v4-pro">DeepSeek V4 Pro（默认）</option>
-            <option value="deepseek-v4-flash">DeepSeek V4 Flash（更快更省）</option>
-            <option value="qwen3.7-max" disabled>Qwen3.7-Max（暂禁用·成本高）</option>
+            <option value="deepseek-v4-flash">DeepSeek V4 Flash（更快）</option>
+            <option value="qwen3.7-max" disabled>Qwen3.7-Max（暂不可选）</option>
           </select>
         </label>
         <label class="toggle" title="缺少本地日线 CSV 时，自动补齐用于均线、ATR、趋势判断的历史日线。">
