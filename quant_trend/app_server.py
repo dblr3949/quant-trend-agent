@@ -27,6 +27,7 @@ from .market_data import (
     load_quotes,
     save_quotes,
 )
+from .options_analysis import analyze_option_chain
 from .portfolio import Portfolio, Position, portfolio_from_dict, portfolio_to_dict, save_portfolio
 from .portfolio_input import portfolio_from_text
 from .plan_summary import build_executive_summary
@@ -65,6 +66,7 @@ DEFAULT_SETTINGS = {
     "ibkr_market_data_type": 1,
     "ibkr_timeout": 8.0,
     "fetch_intraday": True,
+    "fetch_options_analysis": False,
     "intraday_bar_size": "1 min",
     "intraday_duration": "1 D",
     "intraday_use_rth": False,
@@ -180,6 +182,18 @@ def _symbols_for_run(config: dict, portfolio: Portfolio, prompt_symbols: set[str
         symbols.update(symbol.upper() for symbol in config.get("base_target_weights", {}))
     symbols.update(symbol.upper() for symbol in config.get("market_proxies", []))
     return sorted(symbols)
+
+
+def _option_symbols_for_run(portfolio: Portfolio, prompt_symbols: set[str] | None = None, research: dict | None = None) -> list[str]:
+    symbols = {symbol.upper() for symbol in portfolio.positions}
+    symbols.update(symbol.upper() for symbol in (prompt_symbols or set()))
+    if research:
+        symbols.update(str(symbol).upper() for symbol in (research.get("symbols") or {}) if str(symbol or "").strip())
+    return sorted(
+        symbol
+        for symbol in symbols
+        if symbol and not _is_vix_index_symbol(symbol) and symbol.replace(".", "").replace("-", "").isalnum()
+    )
 
 
 def _row_value(row, column: str):
@@ -556,6 +570,69 @@ class AgentApp:
 
         return {}, [f"{provider} 暂未接入当日分钟线"]
 
+    def fetch_options_analysis(
+        self,
+        provider: str,
+        symbols: list[str],
+        quotes: dict,
+        settings: dict | None = None,
+    ) -> tuple[dict, list[str]]:
+        settings = settings or {}
+        if not settings.get("fetch_options_analysis", False):
+            return {}, []
+        if provider != "massive":
+            return {}, ["期权分析当前仅支持 Massive/Polygon 行情源。"]
+        if not symbols:
+            return {}, ["期权分析没有可用标的。"]
+        client = MassiveDataClient(
+            base_url=str(settings.get("massive_rest_url") or "http://44.219.45.87:8081"),
+            timeout=max(float(settings.get("massive_timeout") or 10.0), 18.0),
+        )
+        today = datetime.now(timezone.utc).date()
+        expiration_lte = (today + timedelta(days=75)).isoformat()
+        warnings: list[str] = []
+        output = {
+            "enabled": True,
+            "source": "massive:options_snapshot",
+            "asof": _now_iso(),
+            "window": {"expiration_gte": today.isoformat(), "expiration_lte": expiration_lte},
+            "symbols": {},
+        }
+        for symbol in symbols[:12]:
+            try:
+                calls = client.fetch_option_chain_snapshot(
+                    symbol,
+                    contract_type="call",
+                    expiration_gte=today.isoformat(),
+                    expiration_lte=expiration_lte,
+                    limit=250,
+                    max_pages=2,
+                )
+                puts = client.fetch_option_chain_snapshot(
+                    symbol,
+                    contract_type="put",
+                    expiration_gte=today.isoformat(),
+                    expiration_lte=expiration_lte,
+                    limit=250,
+                    max_pages=2,
+                )
+                chain = calls + puts
+                quote_item = quotes.get(symbol)
+                analysis = analyze_option_chain(
+                    symbol,
+                    chain,
+                    underlying_price=None if quote_item is None else quote_item.price,
+                    today=today,
+                )
+                output["symbols"][symbol] = analysis
+                if analysis.get("status") != "ok":
+                    warnings.append(f"{symbol}: 期权链数据不足")
+            except Exception as exc:
+                warnings.append(f"{symbol}: Massive 期权链失败: {exc}")
+        if not output["symbols"]:
+            warnings.append("Massive 期权分析未返回任何标的。")
+        return output, warnings
+
     def save_portfolio_payload(self, payload: dict, user_id: int | None = None) -> dict:
         portfolio = portfolio_from_dict(payload)
         data = portfolio_to_dict(portfolio)
@@ -743,6 +820,8 @@ class AgentApp:
             sources.append({"name": source_name, "type": "intraday", "usage": "用于开盘至今、VWAP、近 30 分钟趋势和日内区间评分。"})
         if prompt.strip():
             sources.append({"name": "本次自然语言 prompt", "type": "manual_prompt", "usage": "优先用 LLM 解析为软/硬约束、条件、做T意图和个股偏置；规则解析作为硬约束护栏和失败兜底。"})
+        if settings.get("fetch_options_analysis", False):
+            sources.append({"name": "Massive/Polygon 期权链快照", "type": "options_snapshot", "usage": "按持仓和 prompt 提及标的读取近月期权链，用于 PCR、IV、偏斜、最大痛点、OI墙、简化GEX和流动性解释。"})
         if self.research_path.exists():
             sources.append({"name": "data/research_overlay.json", "type": "manual_research_overlay", "usage": "本地研究/事件弱覆盖层；数据源未自动化前，只作为辅助偏置，不作为主因。"})
         if provider == "ibkr":
@@ -786,6 +865,12 @@ class AgentApp:
                 "weight": "弱覆盖",
                 "status": f"手动事件 {len(events)} 条",
                 "detail": "当前没有可靠自动数据源时只展示并传给 LLM 做辅助解释，不作为主决策锚。",
+            },
+            {
+                "name": "期权链结构",
+                "weight": "解释层",
+                "status": "已启用" if plan.get("options_analysis", {}).get("symbols") else "未启用/无数据",
+                "detail": "PCR、近月ATM IV、25D偏斜、最大痛点、OI墙、简化GEX和价差流动性会进入前端期权分析与 LLM 总结；第一版不直接改变主挂单。",
             },
             {
                 "name": "行情来源边界",
@@ -847,6 +932,23 @@ class AgentApp:
                 else:
                     intraday_warnings.append("当日分钟线已关闭")
 
+                options_analysis: dict = {}
+                options_warnings: list[str] = []
+                if settings.get("fetch_options_analysis", False):
+                    option_symbols = _option_symbols_for_run(portfolio, prompt_symbols=prompt_symbols, research=base_research)
+                    self._progress_step(
+                        "读取期权链",
+                        f"使用 Massive/Polygon 期权链快照读取 {len(option_symbols)} 个持仓/提及标的，覆盖未来约 75 天。",
+                        {"标的数": len(option_symbols)},
+                    )
+                    options_analysis, options_warnings = self.fetch_options_analysis(provider, option_symbols, quotes, settings)
+                    ok_count = len([item for item in (options_analysis.get("symbols") or {}).values() if item.get("status") == "ok"])
+                    self._progress_step(
+                        "期权分析完成",
+                        "生成 PCR、IV、偏斜、最大痛点、OI墙、简化GEX和流动性摘要；本版只作解释层，不直接改挂单。",
+                        {"成功标的": ok_count, "提示数": len(options_warnings)},
+                    )
+
                 self._progress_step("解析本次想法", "用 LLM+规则护栏解析自然语言 prompt；普通限制是软约束，明确禁止才硬拦。", {"prompt长度": len(prompt)})
                 prompt_research = overlay_from_prompt_with_llm(prompt, symbols, model=llm_model)
                 parser_meta = prompt_research.get("prompt_parser", {}) if isinstance(prompt_research, dict) else {}
@@ -891,7 +993,8 @@ class AgentApp:
                 }
                 plan["input_portfolio"] = portfolio_to_dict(portfolio)
                 plan["history_context"] = self.compare_previous(portfolio, user_id=user_id)
-                plan["data_warnings"] = history_warnings + intraday_warnings + plan.get("data_warnings", [])
+                plan["options_analysis"] = options_analysis
+                plan["data_warnings"] = history_warnings + intraday_warnings + options_warnings + plan.get("data_warnings", [])
                 plan["decision_context"] = self._decision_factors(plan, research, prompt, provider)
                 path = self.runs_dir / f"{run_id}.json"
                 current_progress = self.get_progress(user_id=user_id)

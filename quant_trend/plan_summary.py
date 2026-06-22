@@ -140,6 +140,7 @@ def _compact_plan(plan: dict) -> dict:
             **market_structure,
             "score_text": _score_text(market_structure.get("score"), market_structure.get("score_range"), -6, 6),
         },
+        "options_analysis": plan.get("options_analysis", {}),
         "market_technical_analysis": {
             symbol: {
                 **item,
@@ -409,6 +410,8 @@ def _call_openai_summary(compact: dict, *, effort_override: str | None = None, f
         "开头必须先写一段整体市场框架，明确覆盖 SPY、SMH、SOXX、^VIX；缺数据就写缺数据。"
         "每段可以较完整但要紧凑，像交易台晨会摘要；不要因为篇幅省略任何持仓股票。"
         "优先解释近期量价技术面：支撑、压力、Volume Profile、POC/VAH/VAL/HVN/LVN、筹码占比、自动锚定VWAP、高量区、20日量比、日内趋势、多周期风险调整动量、区间波动率和订单流/VPIN近似。"
+        "如果 options_analysis 启用，必须按标的简短解释期权链结构：OI PCR、成交PCR、近月ATM IV、25D偏斜、最大痛点、OI墙、简化GEX和流动性；"
+        "期权链只是辅助解释层，不得把期权指标写成确定方向或自动交易依据。"
         "^VIX 必须按 volatility_analysis 里的绝对水平、252日分位、126日Z-score、5日变化和20日均值偏离解释，不要写股票式成交量/POC。"
         "如存在 llm_limit_decisions 或 order.llm_limit_decision，要说明模型选择的候选点位依据。"
         "如存在 order.llm_reference_ladder，只需简短提及有2-3档参考价梯；强调它是参考分层，不是自动下单。"

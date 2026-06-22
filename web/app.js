@@ -294,6 +294,7 @@ function currentSettingsFromForm() {
     ibkr_market_data_type: Number($("ibkrMarketDataType").value || 1),
     ibkr_timeout: Number($("ibkrTimeout").value || 8),
     fetch_intraday: $("fetchIntraday").checked,
+    fetch_options_analysis: $("fetchOptionsAnalysis").checked,
     intraday_bar_size: $("intradayBarSize").value || "1 min",
     intraday_duration: $("intradayDuration").value || "1 D",
     intraday_use_rth: $("intradayUseRth").checked,
@@ -1507,6 +1508,120 @@ function closeTechModal() {
   $("techModal").hidden = true;
 }
 
+function fmtMaybeNumber(value, digits = 2) {
+  if (value === null || value === undefined || value === "") return "-";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return number.toFixed(digits).replace(/\.?0+$/, "");
+}
+
+function fmtIv(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  return fmtPct(Number(value));
+}
+
+function renderOiWallList(rows, typeLabel) {
+  const items = rows || [];
+  if (!items.length) return `<li class="muted">暂无${escapeHtml(typeLabel)} OI墙</li>`;
+  return items
+    .map(
+      (item) => `
+        <li title="${escapeHtml(`${item.expiration || "-"} · DTE ${item.dte ?? "-"} · IV ${fmtIv(item.iv)}`)}">
+          <strong>${fmtPrice(item.strike)}</strong>
+          <span>${escapeHtml(item.expiration || "-")} · OI ${Number(item.open_interest || 0).toLocaleString()} · 距现价 ${fmtPct(item.distance_pct)}</span>
+        </li>
+      `,
+    )
+    .join("");
+}
+
+function renderExpirationOptions(rows) {
+  const items = rows || [];
+  if (!items.length) return `<div class="muted">暂无到期结构</div>`;
+  return `
+    <div class="option-expiry-grid">
+      ${items
+        .slice(0, 4)
+        .map(
+          (item) => `
+            <div title="${escapeHtml(`Call OI ${item.call_oi || 0} / Put OI ${item.put_oi || 0}`)}">
+              <strong>${escapeHtml(item.expiration || "-")}</strong>
+              <span>DTE ${item.dte ?? "-"} · OI PCR ${fmtMaybeNumber(item.put_call_oi_ratio)}</span>
+              <span>ATM IV ${fmtIv(item.atm_iv)} · Max Pain ${item.max_pain ? fmtPrice(item.max_pain.strike) : "-"}</span>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderOptionsAnalysis(optionsAnalysis) {
+  const target = $("optionsAnalysis");
+  if (!target) return;
+  if (!optionsAnalysis || !optionsAnalysis.enabled) {
+    target.innerHTML = `<div class="muted">未启用期权分析。勾选“期权分析”后，下次生成建议会读取 Massive/Polygon 期权链。</div>`;
+    return;
+  }
+  const entries = Object.values(optionsAnalysis.symbols || {}).sort((a, b) => String(a.symbol).localeCompare(String(b.symbol)));
+  if (!entries.length) {
+    target.innerHTML = `<div class="muted">期权分析已启用，但本轮没有可展示数据。</div>`;
+    return;
+  }
+  target.innerHTML = `
+    <div class="options-grid">
+      ${entries
+        .map((item) => {
+          const ok = item.status === "ok";
+          return `
+            <article class="option-card ${ok ? "" : "is-muted"}">
+              <div class="option-head">
+                <div>
+                  <strong>${escapeHtml(item.symbol || "-")}</strong>
+                  <span>${escapeHtml(item.label || "期权数据不足")} ${item.score !== undefined ? `· ${escapeHtml(formatScore(item.score, item.score_range, "prompt"))}` : ""}</span>
+                </div>
+                <small>${ok ? `${item.contracts || 0} 合约 · ${item.expiration_count || 0} 个到期` : "无可用链"}</small>
+              </div>
+              ${
+                ok
+                  ? `
+                    <div class="option-metrics">
+                      <div><span>现价</span><b>${fmtPrice(item.underlying_price)}</b></div>
+                      <div><span>OI PCR</span><b>${fmtMaybeNumber(item.put_call_oi_ratio)}</b></div>
+                      <div><span>成交PCR</span><b>${fmtMaybeNumber(item.put_call_volume_ratio)}</b></div>
+                      <div><span>ATM IV</span><b>${fmtIv(item.atm_iv)}</b></div>
+                      <div><span>25D偏斜</span><b>${fmtMaybeNumber(item.skew_25d, 4)}</b></div>
+                      <div><span>最大痛点</span><b>${item.max_pain ? fmtPrice(item.max_pain.strike) : "-"}</b></div>
+                      <div><span>简化GEX</span><b>${fmtMaybeNumber(item.net_gex, 0)}</b></div>
+                      <div><span>平均价差</span><b>${item.liquidity?.avg_spread_pct === null || item.liquidity?.avg_spread_pct === undefined ? "-" : fmtPct(item.liquidity.avg_spread_pct)}</b></div>
+                    </div>
+                    <p class="option-explanation">${escapeHtml(item.explanation || "")}</p>
+                    <div class="option-walls">
+                      <div>
+                        <h4>Call OI墙</h4>
+                        <ul>${renderOiWallList(item.top_call_oi, "Call")}</ul>
+                      </div>
+                      <div>
+                        <h4>Put OI墙</h4>
+                        <ul>${renderOiWallList(item.top_put_oi, "Put")}</ul>
+                      </div>
+                    </div>
+                    ${renderExpirationOptions(item.expirations)}
+                    <details class="tech-detail">
+                      <summary>解释口径</summary>
+                      <p>${escapeHtml((item.reasons || []).join("；") || "期权指标只作为辅助解释，不直接改变主挂单。")}</p>
+                    </details>
+                  `
+                  : `<p class="option-explanation">${escapeHtml(item.explanation || "期权数据不足")}</p>`
+              }
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function renderIntraday(intraday) {
   const target = $("intradaySummary");
   const symbols = Object.keys(intraday || {}).sort();
@@ -1660,6 +1775,7 @@ async function loadState() {
   $("ibkrMarketDataType").value = String(appState.settings.ibkr_market_data_type || 1);
   $("ibkrTimeout").value = appState.settings.ibkr_timeout || 8;
   $("fetchIntraday").checked = appState.settings.fetch_intraday !== false;
+  $("fetchOptionsAnalysis").checked = !!appState.settings.fetch_options_analysis;
   $("intradayBarSize").value = appState.settings.intraday_bar_size || "1 min";
   $("intradayDuration").value = appState.settings.intraday_duration || "1 D";
   $("intradayUseRth").checked = !!appState.settings.intraday_use_rth;
@@ -2123,6 +2239,7 @@ function renderRun(plan) {
   $("warnings").innerHTML = "";
   $("researchProcess").innerHTML = "";
   $("technicalAnalysis").innerHTML = "";
+  if ($("optionsAnalysis")) $("optionsAnalysis").innerHTML = "";
   $("intradaySummary").innerHTML = "";
 
   if (!plan) {
@@ -2135,6 +2252,7 @@ function renderRun(plan) {
     drawExposure(null);
     renderMarketRegime(null);
     renderTechnicalAnalysis(null);
+    renderOptionsAnalysis(null);
     renderResearchProcess(null);
     renderIntraday(null);
     renderTradeGroups([], null);
@@ -2159,6 +2277,7 @@ function renderRun(plan) {
   drawExposure(plan);
   renderMarketRegime(plan);
   renderTechnicalAnalysis(plan.technical_analysis);
+  renderOptionsAnalysis(plan.options_analysis);
   renderResearchProcess(plan.research_process, plan);
   renderIntraday(plan.intraday);
   renderTradeGroups(plan.trade_groups, plan);

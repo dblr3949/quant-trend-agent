@@ -156,6 +156,10 @@
             <input id="fetchIntraday" type="checkbox" checked />
             <span>读取当日分钟线 <span class="hint" title="Massive/Polygon 为默认；IBKR 和 Yahoo 只作为可选兜底。">?</span></span>
           </label>
+          <label class="toggle" title="打开后仅对持仓和 prompt 提到的普通股票读取 Massive/Polygon 期权链快照。">
+            <input id="fetchOptionsAnalysis" type="checkbox" />
+            <span>期权分析 <span class="hint" title="分析 PCR、IV、偏斜、最大痛点、OI墙、简化GEX和流动性；第一版只作解释层，不直接改挂单。">?</span></span>
+          </label>
           <label class="field" title="分钟线越细越灵敏，也越慢；1 分钟更精细，5 分钟更平滑。">
             <span>粒度 <span class="hint" title="默认 1 分钟；想更平滑可切到 5 分钟。">?</span></span>
             <select id="intradayBarSize">
@@ -316,6 +320,9 @@
 
         <h3>近期量价点位 <span class="hint" tabindex="0" role="button" aria-label="近期量价点位口径" title="按多窗口日线、当日分钟线和成交分布生成支撑/压力。重点看 POC、VAH/VAL、HVN/LVN、自动锚定VWAP、筹码占比、成交占比和共振。">?</span></h3>
         <div id="technicalAnalysis" class="technical-analysis"></div>
+
+        <h3>期权分析 <span class="hint" tabindex="0" role="button" aria-label="期权分析口径" title="仅在勾选期权分析时读取。使用 Massive/Polygon 期权链快照，计算 PCR、IV、偏斜、最大痛点、OI墙、简化GEX和流动性；第一版只作解释层。">?</span></h3>
+        <div id="optionsAnalysis" class="options-analysis"></div>
 
         <h3>研究过程 <span class="hint" tabindex="0" role="button" aria-label="研究过程口径" title="按取数、指标、量价结构、仓位杠杆、你的 prompt、LLM 复核六步展示本轮计算链路。每个评分都带范围或分位。">?</span></h3>
         <div id="researchProcess" class="research-process"></div>

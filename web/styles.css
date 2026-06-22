@@ -1403,6 +1403,139 @@ td select {
   transform: translateY(-1px);
 }
 
+.options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 12px;
+}
+
+.option-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 11px;
+}
+
+.option-card.is-muted {
+  opacity: 0.72;
+}
+
+.option-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.option-head strong,
+.option-head span,
+.option-head small {
+  display: block;
+}
+
+.option-head strong {
+  color: var(--text);
+  font-size: 17px;
+}
+
+.option-head span,
+.option-head small {
+  color: var(--muted);
+}
+
+.option-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.option-metrics div {
+  border: 1px solid #e5ebef;
+  border-radius: 7px;
+  background: #fff;
+  padding: 7px 8px;
+}
+
+.option-metrics span,
+.option-metrics b {
+  display: block;
+}
+
+.option-metrics span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.option-metrics b {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.option-explanation {
+  margin: 0 0 8px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.option-walls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.option-walls h4 {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.option-walls ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.option-walls li {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 6px;
+  padding: 3px 0;
+  border-top: 1px solid #eef2f5;
+  font-size: 12px;
+}
+
+.option-walls li span {
+  color: var(--muted);
+}
+
+.option-expiry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.option-expiry-grid div {
+  border: 1px solid #e8edf1;
+  border-radius: 7px;
+  padding: 7px;
+  background: #fff;
+}
+
+.option-expiry-grid strong,
+.option-expiry-grid span {
+  display: block;
+}
+
+.option-expiry-grid span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .tech-head {
   display: flex;
   justify-content: space-between;
@@ -2993,6 +3126,7 @@ td select {
   .score-grid,
   .decision-factors,
   .technical-grid,
+  .options-grid,
   .process-columns {
     grid-template-columns: 1fr;
   }
@@ -3053,6 +3187,9 @@ td select {
 
   .tech-head,
   .level-columns,
+  .option-metrics,
+  .option-walls,
+  .option-expiry-grid,
   .trade-leg-grid {
     grid-template-columns: 1fr;
   }

@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 try:
@@ -339,6 +339,11 @@ class MassiveDataClient:
         with urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def _get_json_from_next_url(self, next_url: str) -> dict:
+        parsed = urlparse(next_url)
+        params = {key: value for key, value in parse_qsl(parsed.query) if key.lower() != "apikey"}
+        return self._get_json(parsed.path, params)
+
     def _snapshot_quote(self, symbol: str, payload: dict) -> Quote | None:
         ticker = payload.get("ticker") or payload.get("results") or payload
         if not isinstance(ticker, dict):
@@ -575,6 +580,41 @@ class MassiveDataClient:
             except Exception as exc:
                 self.last_symbol_errors[symbol] = [str(exc)]
         return result
+
+    def fetch_option_chain_snapshot(
+        self,
+        underlying: str,
+        *,
+        contract_type: str | None = None,
+        expiration_gte: str | None = None,
+        expiration_lte: str | None = None,
+        limit: int = 250,
+        max_pages: int = 2,
+    ) -> list[dict]:
+        symbol = str(underlying or "").strip().upper()
+        params: dict[str, str] = {
+            "limit": str(max(1, min(int(limit), 250))),
+            "sort": "expiration_date",
+            "order": "asc",
+        }
+        if expiration_gte:
+            params["expiration_date.gte"] = expiration_gte
+        if expiration_lte:
+            params["expiration_date.lte"] = expiration_lte
+        if contract_type in {"call", "put"}:
+            params["contract_type"] = contract_type
+
+        rows: list[dict] = []
+        payload = self._get_json(f"/v3/snapshot/options/{quote(symbol, safe='')}", params)
+        for _ in range(max(1, int(max_pages))):
+            results = payload.get("results") or []
+            if isinstance(results, list):
+                rows.extend(item for item in results if isinstance(item, dict))
+            next_url = payload.get("next_url")
+            if not next_url:
+                break
+            payload = self._get_json_from_next_url(str(next_url))
+        return rows
 
 
 class AlpacaDataClient:
