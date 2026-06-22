@@ -54,6 +54,38 @@ def _score_meta(value: float, minimum: float, maximum: float, unit: str = "") ->
     }
 
 
+def _score_label(value: float, labels: tuple[str, str, str, str]) -> str:
+    if value >= 75:
+        return labels[3]
+    if value >= 50:
+        return labels[2]
+    if value >= 25:
+        return labels[1]
+    return labels[0]
+
+
+def _alert(title: str, detail: str, score: float, *, tone: str = "warn", metric: str | None = None, threshold: str | None = None) -> dict:
+    clipped = round(max(0.0, min(100.0, float(score))), 1)
+    if clipped >= 75:
+        severity = "高"
+    elif clipped >= 50:
+        severity = "中高"
+    elif clipped >= 25:
+        severity = "中"
+    else:
+        severity = "低"
+    return {
+        "title": title,
+        "detail": detail,
+        "score": clipped,
+        "score_range": _score_meta(clipped, 0, 100),
+        "severity": severity,
+        "tone": tone,
+        "metric": metric,
+        "threshold": threshold,
+    }
+
+
 def _contract_mid(raw: dict) -> float | None:
     quote = raw.get("last_quote") or {}
     bid = _num(quote.get("bid") or quote.get("bid_price") or quote.get("bp"))
@@ -190,6 +222,68 @@ def _top_oi(items: list[dict], contract_type: str, limit: int = 3) -> list[dict]
     ]
 
 
+def _top_unusual_contracts(items: list[dict], limit: int = 5) -> list[dict]:
+    candidates = []
+    for item in items:
+        volume = float(item.get("volume") or 0.0)
+        if volume < 10:
+            continue
+        open_interest = float(item.get("open_interest") or 0.0)
+        volume_oi_ratio = volume / max(open_interest, 1.0)
+        short_dte_bonus = 10.0 if int(item.get("dte") or 0) <= 14 else 0.0
+        score = min(100.0, volume_oi_ratio * 65.0 + min(volume / 2000.0, 1.0) * 25.0 + short_dte_bonus)
+        if score < 18:
+            continue
+        candidates.append(
+            {
+                "ticker": item.get("ticker"),
+                "type": item.get("type"),
+                "expiration": item.get("expiration"),
+                "dte": item.get("dte"),
+                "strike": item.get("strike"),
+                "volume": int(volume),
+                "open_interest": int(open_interest),
+                "volume_oi_ratio": round(volume_oi_ratio, 4),
+                "distance_pct": item.get("distance_pct"),
+                "iv": item.get("iv"),
+                "spread_pct": None if item.get("spread_pct") is None else round(float(item.get("spread_pct")), 4),
+                "score": round(score, 1),
+                "score_range": _score_meta(score, 0, 100),
+            }
+        )
+    return sorted(candidates, key=lambda row: (float(row.get("score") or 0.0), int(row.get("volume") or 0)), reverse=True)[:limit]
+
+
+def _term_structure(expiry_summaries: list[dict]) -> dict:
+    rows = [item for item in sorted(expiry_summaries, key=lambda row: int(row.get("dte") or 0)) if item.get("atm_iv") is not None]
+    if not rows:
+        return {"front_atm_iv": None, "back_atm_iv": None, "front_iv_premium": None}
+    front = rows[0]
+    back_rows = rows[1:4]
+    back_iv = None
+    if back_rows:
+        values = [float(item["atm_iv"]) for item in back_rows if item.get("atm_iv") is not None]
+        back_iv = round(sum(values) / len(values), 4) if values else None
+    premium = None
+    if back_iv and back_iv > 0:
+        premium = round(float(front["atm_iv"]) / back_iv - 1.0, 4)
+    return {
+        "front_expiration": front.get("expiration"),
+        "front_dte": front.get("dte"),
+        "front_atm_iv": front.get("atm_iv"),
+        "back_atm_iv": back_iv,
+        "front_iv_premium": premium,
+    }
+
+
+def _expected_move_pct(atm_iv: float | None, dte: int | float | None) -> float | None:
+    iv = _num(atm_iv)
+    days = _num(dte)
+    if iv is None or days is None or days <= 0:
+        return None
+    return round(iv * math.sqrt(max(days, 1.0) / 365.0), 4)
+
+
 def _expiration_summary(expiration: str, items: list[dict], underlying_price: float | None, today: date) -> dict:
     call_items = [item for item in items if item.get("type") == "call"]
     put_items = [item for item in items if item.get("type") == "put"]
@@ -277,6 +371,236 @@ def _score_options(summary: dict) -> tuple[float, str, list[str]]:
     return score, label, reasons
 
 
+def _option_risk_and_alerts(summary: dict, unusual_contracts: list[dict], term: dict) -> tuple[dict, dict, list[dict], list[dict], str]:
+    alerts: list[dict] = []
+    signals: list[dict] = []
+    risk_score = 10.0
+    anomaly_score = 5.0
+
+    pcr_oi = summary.get("put_call_oi_ratio")
+    pcr_volume = summary.get("put_call_volume_ratio")
+    atm_iv = summary.get("atm_iv")
+    skew = summary.get("skew_25d")
+    gex = summary.get("net_gex")
+    liquidity = summary.get("liquidity") or {}
+    avg_spread = liquidity.get("avg_spread_pct")
+    volume_oi_ratio = summary.get("volume_oi_ratio")
+    expected_move = summary.get("expected_move_pct")
+    front_iv_premium = term.get("front_iv_premium")
+
+    direction_detail = []
+    direction_label = "方向中性"
+    direction_score = float(summary.get("score") or 0.0)
+    if pcr_oi is not None:
+        direction_detail.append(f"OI PCR {pcr_oi}")
+    if pcr_volume is not None:
+        direction_detail.append(f"成交PCR {pcr_volume}")
+    if direction_score <= -1.4:
+        direction_label = "认沽/保护占优"
+    elif direction_score >= 1.4:
+        direction_label = "认购占优"
+    elif direction_score < -0.5:
+        direction_label = "略偏保护"
+    elif direction_score > 0.5:
+        direction_label = "略偏认购"
+    signals.append(
+        {
+            "name": "方向压力",
+            "label": direction_label,
+            "score": round(direction_score, 2),
+            "score_range": _score_meta(direction_score, -5, 5),
+            "detail": "；".join(direction_detail) or "PCR 数据不足",
+        }
+    )
+
+    if pcr_oi is not None and pcr_oi > 1.25:
+        add = 9 if pcr_oi < 2 else 15
+        risk_score += add
+        alerts.append(_alert("认沽仓位偏重", f"OI PCR {pcr_oi}，保护性/看空仓位高于认购。", 45 + add * 3, tone="danger", metric="OI PCR", threshold=">1.25偏谨慎，>2偏拥挤"))
+    elif pcr_oi is not None and pcr_oi < 0.65:
+        anomaly_score += 6
+        alerts.append(_alert("认购仓位拥挤", f"OI PCR {pcr_oi}，认购未平仓更集中，追涨拥挤度上升。", 40, tone="positive", metric="OI PCR", threshold="<0.65偏认购"))
+    if pcr_volume is not None and pcr_volume > 1.35:
+        add = 8 if pcr_volume < 2 else 13
+        risk_score += add
+        anomaly_score += 8
+        alerts.append(_alert("当日认沽成交占优", f"成交PCR {pcr_volume}，短线保护/看空成交更活跃。", 48 + add * 3, tone="danger", metric="成交PCR", threshold=">1.35偏保护，>2偏强"))
+    elif pcr_volume is not None and pcr_volume < 0.65:
+        anomaly_score += 7
+        alerts.append(_alert("当日认购成交占优", f"成交PCR {pcr_volume}，短线认购成交更活跃。", 44, tone="positive", metric="成交PCR", threshold="<0.65偏认购"))
+
+    vol_risk_score = 0.0
+    if atm_iv is not None:
+        if atm_iv >= 1.2:
+            vol_risk_score = 86
+            risk_score += 16
+        elif atm_iv >= 0.8:
+            vol_risk_score = 68
+            risk_score += 11
+        elif atm_iv >= 0.55:
+            vol_risk_score = 48
+            risk_score += 6
+        else:
+            vol_risk_score = 25
+        detail = f"ATM IV {atm_iv * 100:.1f}%"
+        if expected_move is not None:
+            detail += f"，焦点到期预期波动约±{expected_move * 100:.1f}%"
+        signals.append(
+            {
+                "name": "波动溢价",
+                "label": _score_label(vol_risk_score, ("偏低", "正常", "偏高", "极高")),
+                "score": vol_risk_score,
+                "score_range": _score_meta(vol_risk_score, 0, 100),
+                "detail": detail,
+            }
+        )
+        if vol_risk_score >= 68:
+            alerts.append(_alert("隐含波动偏高", detail, vol_risk_score, tone="warn", metric="ATM IV", threshold=">80%偏高，>120%极高"))
+
+    if skew is not None:
+        skew_abs_score = min(100.0, abs(float(skew)) * 900.0)
+        label = "认沽尾部溢价" if skew > 0.04 else "认购上行溢价" if skew < -0.02 else "偏斜温和"
+        signals.append(
+            {
+                "name": "尾部偏斜",
+                "label": label,
+                "score": round(skew_abs_score, 1),
+                "score_range": _score_meta(skew_abs_score, 0, 100),
+                "detail": f"25D Put IV - Call IV = {skew}",
+            }
+        )
+        if skew > 0.04:
+            risk_score += 9 if skew < 0.08 else 14
+            alerts.append(_alert("下行尾部保护升温", f"25D偏斜 {skew}，认沽波动率高于认购。", 58 if skew < 0.08 else 78, tone="danger", metric="25D偏斜", threshold=">0.04偏保护，>0.08强保护"))
+        elif skew < -0.04:
+            anomaly_score += 5
+            alerts.append(_alert("上行追逐偏强", f"25D偏斜 {skew}，认购波动率相对更贵。", 45, tone="positive", metric="25D偏斜", threshold="<-0.04偏上行追逐"))
+
+    gex_score = 35.0
+    if gex is not None:
+        if gex < 0:
+            risk_score += 12
+            anomaly_score += 4
+            gex_score = 70
+            label = "负GEX放大波动"
+            alerts.append(_alert("负GEX波动放大", f"简化GEX {gex:.0f}，价格变动可能更容易被放大。", 70, tone="danger", metric="简化GEX", threshold="<0偏波动放大"))
+        else:
+            gex_score = 35
+            label = "正GEX偏钉扎"
+    else:
+        label = "GEX不足"
+    max_pain = summary.get("max_pain") or {}
+    max_pain_distance = max_pain.get("distance_pct")
+    if max_pain_distance is not None and abs(float(max_pain_distance)) <= 0.03:
+        anomaly_score += 5
+        alerts.append(_alert("最大痛点靠近现价", f"最大痛点 {max_pain.get('strike')}，距现价 {max_pain_distance * 100:.1f}%。", 42, tone="info", metric="最大痛点", threshold="距现价3%内"))
+    signals.append(
+        {
+            "name": "GEX/磁吸",
+            "label": label,
+            "score": gex_score,
+            "score_range": _score_meta(gex_score, 0, 100),
+            "detail": f"简化GEX {gex:.0f}" if gex is not None else "Greeks 数据不足",
+        }
+    )
+
+    flow_detail = []
+    if volume_oi_ratio is not None:
+        flow_detail.append(f"成交/OI {volume_oi_ratio}")
+        if volume_oi_ratio > 0.5:
+            anomaly_score += 20
+            alerts.append(_alert("期权成交/OI显著放大", f"总成交/OI {volume_oi_ratio}，新成交相对未平仓过高。", 82, tone="warn", metric="成交/OI", threshold=">0.25异动，>0.5显著异动"))
+        elif volume_oi_ratio > 0.25:
+            anomaly_score += 11
+            alerts.append(_alert("期权成交/OI偏高", f"总成交/OI {volume_oi_ratio}，短线成交活跃度偏高。", 58, tone="warn", metric="成交/OI", threshold=">0.25异动"))
+    if pcr_oi is not None and pcr_volume is not None:
+        divergence = abs(math.log((float(pcr_volume) + 0.05) / (float(pcr_oi) + 0.05)))
+        if divergence > 0.7:
+            anomaly_score += 10
+            alerts.append(_alert("当日成交方向偏离存量仓位", f"成交PCR {pcr_volume} vs OI PCR {pcr_oi}，短线资金方向和存量仓位差异大。", min(85, 45 + divergence * 25), tone="warn", metric="PCR背离", threshold="log差>0.7"))
+    if unusual_contracts:
+        best = unusual_contracts[0]
+        anomaly_score += min(22, float(best.get("score") or 0) * 0.25)
+        direction = "Call" if best.get("type") == "call" else "Put"
+        alerts.append(
+            _alert(
+                f"{direction}单合约成交异动",
+                f"{best.get('expiration')} {direction} {best.get('strike')} 成交/OI {best.get('volume_oi_ratio')}，成交 {best.get('volume')} 张。",
+                max(45, float(best.get("score") or 0)),
+                tone="positive" if best.get("type") == "call" else "danger",
+                metric="单合约成交/OI",
+                threshold="成交>=10且成交/OI较高",
+            )
+        )
+    flow_score = min(100.0, max(0.0, anomaly_score))
+    signals.append(
+        {
+            "name": "成交异动",
+            "label": _score_label(flow_score, ("平静", "略活跃", "活跃", "显著异动")),
+            "score": round(flow_score, 1),
+            "score_range": _score_meta(flow_score, 0, 100),
+            "detail": "；".join(flow_detail) or "成交/OI不足",
+        }
+    )
+
+    if front_iv_premium is not None:
+        premium_score = min(100.0, abs(float(front_iv_premium)) * 240.0)
+        signals.append(
+            {
+                "name": "期限结构",
+                "label": "近月IV倒挂" if front_iv_premium > 0.12 else "远月更贵" if front_iv_premium < -0.12 else "期限温和",
+                "score": round(premium_score, 1),
+                "score_range": _score_meta(premium_score, 0, 100),
+                "detail": f"近月ATM IV相对后续均值 {front_iv_premium * 100:.1f}%",
+            }
+        )
+        if front_iv_premium > 0.15:
+            risk_score += 8
+            anomaly_score += 9
+            alerts.append(_alert("近月IV倒挂", f"近月ATM IV比后续到期高 {front_iv_premium * 100:.1f}%，可能反映近端事件/财报/消息风险。", 62, tone="warn", metric="近月IV溢价", threshold=">15%"))
+
+    if avg_spread is not None:
+        liq_score = 20.0
+        if avg_spread > 0.25:
+            liq_score = 82
+            risk_score += 12
+        elif avg_spread > 0.12:
+            liq_score = 62
+            risk_score += 8
+        elif avg_spread > 0.06:
+            liq_score = 42
+            risk_score += 4
+        signals.append(
+            {
+                "name": "流动性",
+                "label": _score_label(liq_score, ("较好", "尚可", "偏差", "很差")),
+                "score": liq_score,
+                "score_range": _score_meta(liq_score, 0, 100),
+                "detail": f"平均买卖价差 {avg_spread * 100:.1f}%",
+            }
+        )
+        if liq_score >= 62:
+            alerts.append(_alert("期权价差偏宽", f"平均买卖价差 {avg_spread * 100:.1f}%，期权信号噪声和交易成本更高。", liq_score, tone="warn", metric="平均价差", threshold=">12%偏宽，>25%很宽"))
+
+    risk_score = round(max(0.0, min(100.0, risk_score)), 1)
+    anomaly_score = round(max(0.0, min(100.0, anomaly_score)), 1)
+    risk = {
+        "score": risk_score,
+        "score_range": _score_meta(risk_score, 0, 100),
+        "label": _score_label(risk_score, ("风险较低", "中等风险", "风险偏高", "高风险")),
+    }
+    anomaly = {
+        "score": anomaly_score,
+        "score_range": _score_meta(anomaly_score, 0, 100),
+        "label": _score_label(anomaly_score, ("暂无明显异动", "轻微异动", "异动偏强", "显著异动")),
+    }
+    sorted_alerts = sorted(alerts, key=lambda item: float(item.get("score") or 0.0), reverse=True)[:6]
+    top_alert = sorted_alerts[0]["title"] if sorted_alerts else "暂无明显期权异动"
+    move_text = f"、焦点到期预期±{expected_move * 100:.1f}%" if expected_move is not None else ""
+    summary_text = f"{risk['label']}，{anomaly['label']}；{direction_label}{move_text}。主要提示：{top_alert}。"
+    return risk, anomaly, sorted_alerts, signals, summary_text
+
+
 def analyze_option_chain(
     symbol: str,
     raw_chain: list[dict],
@@ -319,7 +643,11 @@ def analyze_option_chain(
     put_oi = sum(float(item.get("open_interest") or 0.0) for item in all_puts)
     call_volume = sum(float(item.get("volume") or 0.0) for item in all_calls)
     put_volume = sum(float(item.get("volume") or 0.0) for item in all_puts)
+    total_oi = call_oi + put_oi
+    total_volume = call_volume + put_volume
     quoted_spreads = [float(item["spread_pct"]) for item in clean if item.get("spread_pct") is not None and float(item["spread_pct"]) >= 0]
+    term = _term_structure(expiry_summaries)
+    unusual_contracts = _top_unusual_contracts(clean)
     summary = {
         "symbol": symbol.upper(),
         "status": "ok",
@@ -327,6 +655,9 @@ def analyze_option_chain(
         "underlying_price": None if underlying is None else round(float(underlying), 4),
         "contracts": len(clean),
         "expiration_count": len(expirations),
+        "total_oi": int(total_oi),
+        "total_volume": int(total_volume),
+        "volume_oi_ratio": _safe_ratio(total_volume, total_oi),
         "call_oi": int(call_oi),
         "put_oi": int(put_oi),
         "put_call_oi_ratio": _safe_ratio(put_oi, call_oi),
@@ -340,8 +671,11 @@ def analyze_option_chain(
         "skew_25d": focus.get("skew_25d"),
         "max_pain": focus.get("max_pain"),
         "net_gex": focus.get("net_gex"),
+        "expected_move_pct": _expected_move_pct(focus.get("atm_iv"), focus.get("dte")),
+        "term_structure": term,
         "top_call_oi": _top_oi(clean, "call"),
         "top_put_oi": _top_oi(clean, "put"),
+        "unusual_contracts": unusual_contracts,
         "liquidity": {
             "quoted_contracts": len(quoted_spreads),
             "avg_spread_pct": round(sum(quoted_spreads) / len(quoted_spreads), 4) if quoted_spreads else None,
@@ -349,10 +683,25 @@ def analyze_option_chain(
         "expirations": expiry_summaries[:5],
     }
     score, label, reasons = _score_options(summary)
+    risk, anomaly, risk_alerts, signals, symbol_summary = _option_risk_and_alerts(summary, unusual_contracts, term)
     summary["score"] = score
     summary["score_range"] = _score_meta(score, -5, 5)
     summary["label"] = label
     summary["reasons"] = reasons
+    summary["risk"] = risk
+    summary["anomaly"] = anomaly
+    summary["risk_alerts"] = risk_alerts
+    summary["signals"] = signals
+    summary["symbol_summary"] = symbol_summary
+    summary["llm_signal_payload"] = {
+        "symbol_summary": symbol_summary,
+        "risk": risk,
+        "anomaly": anomaly,
+        "alerts": risk_alerts,
+        "signals": signals,
+        "expected_move_pct": summary.get("expected_move_pct"),
+        "term_structure": term,
+    }
     parts = []
     if summary["put_call_oi_ratio"] is not None:
         parts.append(f"OI PCR {summary['put_call_oi_ratio']}")
@@ -364,5 +713,7 @@ def analyze_option_chain(
         parts.append(f"最大痛点 {summary['max_pain']['strike']}")
     if summary.get("net_gex") is not None:
         parts.append(f"简化GEX {summary['net_gex']:.0f}")
+    if summary.get("expected_move_pct") is not None:
+        parts.append(f"焦点到期预期±{float(summary['expected_move_pct']) * 100:.1f}%")
     summary["explanation"] = "；".join(parts) if parts else "期权链可用，但关键指标较少。"
     return summary

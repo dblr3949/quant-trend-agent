@@ -41,6 +41,10 @@ class OptionsAnalysisTests(unittest.TestCase):
         self.assertEqual(result["top_call_oi"][0]["strike"], 105)
         self.assertEqual(result["top_put_oi"][0]["strike"], 95)
         self.assertIsNotNone(result["max_pain"])
+        self.assertIn("risk", result)
+        self.assertIn("anomaly", result)
+        self.assertIn("signals", result)
+        self.assertIn("symbol_summary", result)
         self.assertIn("PCR", result["explanation"])
 
     def test_empty_option_chain_is_marked_no_data(self):

@@ -1475,6 +1475,202 @@ td select {
   font-size: 14px;
 }
 
+.option-metrics em {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.25;
+}
+
+.option-symbol-summary {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 8px;
+  border: 1px solid #cfe0dc;
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(15, 107, 95, 0.08), rgba(15, 107, 95, 0.02));
+  padding: 9px 10px;
+}
+
+.option-symbol-summary strong {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.option-symbol-summary span {
+  color: #21323d;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.option-alerts {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.option-alert {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid #e6edf2;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 9px;
+}
+
+.option-alert.empty {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  background: #f8fafc;
+}
+
+.option-alert strong,
+.option-alert span,
+.option-alert em {
+  display: block;
+}
+
+.option-alert strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.option-alert span {
+  margin-top: 2px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.option-alert em {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.option-alert.danger {
+  border-color: rgba(180, 55, 55, 0.32);
+  background: rgba(180, 55, 55, 0.055);
+}
+
+.option-alert.danger em,
+.option-alert.danger strong {
+  color: var(--danger);
+}
+
+.option-alert.warn {
+  border-color: rgba(154, 100, 21, 0.32);
+  background: rgba(154, 100, 21, 0.055);
+}
+
+.option-alert.warn em,
+.option-alert.warn strong {
+  color: var(--warn);
+}
+
+.option-alert.positive {
+  border-color: rgba(34, 105, 61, 0.32);
+  background: rgba(34, 105, 61, 0.055);
+}
+
+.option-alert.positive em,
+.option-alert.positive strong {
+  color: var(--ok);
+}
+
+.option-alert.info {
+  border-color: rgba(38, 91, 138, 0.24);
+  background: rgba(38, 91, 138, 0.05);
+}
+
+.option-signal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.option-signal-grid div {
+  min-width: 0;
+  border: 1px solid #e6edf2;
+  border-radius: 8px;
+  background: #fff;
+  padding: 7px 8px;
+}
+
+.option-signal-grid div.danger {
+  border-color: rgba(180, 55, 55, 0.28);
+}
+
+.option-signal-grid div.warn {
+  border-color: rgba(154, 100, 21, 0.28);
+}
+
+.option-signal-grid div.positive {
+  border-color: rgba(34, 105, 61, 0.28);
+}
+
+.option-signal-grid span,
+.option-signal-grid strong,
+.option-signal-grid small {
+  display: block;
+}
+
+.option-signal-grid span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.option-signal-grid strong {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.option-signal-grid small {
+  margin-top: 3px;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.option-unusual-detail {
+  margin-bottom: 8px;
+}
+
+.option-unusual-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.option-unusual-list div {
+  min-width: 0;
+  border: 1px solid #e8edf1;
+  border-radius: 7px;
+  background: #fff;
+  padding: 7px;
+}
+
+.option-unusual-list strong,
+.option-unusual-list span,
+.option-unusual-list small {
+  display: block;
+}
+
+.option-unusual-list span,
+.option-unusual-list small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .option-explanation {
   margin: 0 0 8px;
   color: var(--muted);
@@ -3188,8 +3384,10 @@ td select {
   .tech-head,
   .level-columns,
   .option-metrics,
+  .option-signal-grid,
   .option-walls,
   .option-expiry-grid,
+  .option-unusual-list,
   .trade-leg-grid {
     grid-template-columns: 1fr;
   }

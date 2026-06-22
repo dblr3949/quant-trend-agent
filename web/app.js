@@ -1556,6 +1556,92 @@ function renderExpirationOptions(rows) {
   `;
 }
 
+function optionToneFromScore(score, positiveTone = false) {
+  const number = Number(score || 0);
+  if (number >= 75) return positiveTone ? "positive" : "danger";
+  if (number >= 50) return "warn";
+  if (number >= 25) return "info";
+  return "muted";
+}
+
+function renderOptionMetric(label, value, sublabel, title) {
+  return `
+    <div title="${escapeHtml(title || "")}">
+      <span>${escapeHtml(label)}</span>
+      <b>${escapeHtml(value ?? "-")}</b>
+      ${sublabel ? `<em>${escapeHtml(sublabel)}</em>` : ""}
+    </div>
+  `;
+}
+
+function renderOptionAlerts(alerts) {
+  const items = alerts || [];
+  if (!items.length) {
+    return `<div class="option-alert empty">暂无明显期权异动</div>`;
+  }
+  return `
+    <div class="option-alerts">
+      ${items
+        .slice(0, 4)
+        .map(
+          (item) => `
+            <div class="option-alert ${escapeHtml(item.tone || "warn")}" title="${escapeHtml(`${item.metric || "指标"}；阈值：${item.threshold || "-"}`)}">
+              <div>
+                <strong>${escapeHtml(item.title || "-")}</strong>
+                <span>${escapeHtml(item.detail || "")}</span>
+              </div>
+              <em>${escapeHtml(item.severity || "-")} · ${escapeHtml(formatScore(item.score, item.score_range, "prompt"))}</em>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderOptionSignals(signals) {
+  const items = signals || [];
+  if (!items.length) return "";
+  return `
+    <div class="option-signal-grid">
+      ${items
+        .slice(0, 6)
+        .map(
+          (item) => `
+            <div class="${escapeHtml(optionToneFromScore(item.score, item.name === "成交异动"))}" title="${escapeHtml(formatScore(item.score, item.score_range, item.name))}">
+              <span>${escapeHtml(item.name || "-")}</span>
+              <strong>${escapeHtml(item.label || "-")}</strong>
+              <small>${escapeHtml(item.detail || "")}</small>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderUnusualContracts(rows) {
+  const items = rows || [];
+  if (!items.length) return `<div class="muted">暂无显著单合约成交异动</div>`;
+  return `
+    <div class="option-unusual-list">
+      ${items
+        .slice(0, 4)
+        .map((item) => {
+          const type = item.type === "put" ? "Put" : "Call";
+          return `
+            <div title="${escapeHtml(item.ticker || "")}">
+              <strong>${escapeHtml(type)} ${fmtPrice(item.strike)}</strong>
+              <span>${escapeHtml(item.expiration || "-")} · DTE ${item.dte ?? "-"} · 成交/OI ${fmtMaybeNumber(item.volume_oi_ratio)}</span>
+              <small>成交 ${Number(item.volume || 0).toLocaleString()} · OI ${Number(item.open_interest || 0).toLocaleString()} · ${escapeHtml(formatScore(item.score, item.score_range, "prompt"))}</small>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function renderOptionsAnalysis(optionsAnalysis) {
   const target = $("optionsAnalysis");
   if (!target) return;
@@ -1585,17 +1671,31 @@ function renderOptionsAnalysis(optionsAnalysis) {
               ${
                 ok
                   ? `
-                    <div class="option-metrics">
-                      <div><span>现价</span><b>${fmtPrice(item.underlying_price)}</b></div>
-                      <div><span>OI PCR</span><b>${fmtMaybeNumber(item.put_call_oi_ratio)}</b></div>
-                      <div><span>成交PCR</span><b>${fmtMaybeNumber(item.put_call_volume_ratio)}</b></div>
-                      <div><span>ATM IV</span><b>${fmtIv(item.atm_iv)}</b></div>
-                      <div><span>25D偏斜</span><b>${fmtMaybeNumber(item.skew_25d, 4)}</b></div>
-                      <div><span>最大痛点</span><b>${item.max_pain ? fmtPrice(item.max_pain.strike) : "-"}</b></div>
-                      <div><span>简化GEX</span><b>${fmtMaybeNumber(item.net_gex, 0)}</b></div>
-                      <div><span>平均价差</span><b>${item.liquidity?.avg_spread_pct === null || item.liquidity?.avg_spread_pct === undefined ? "-" : fmtPct(item.liquidity.avg_spread_pct)}</b></div>
+                    <div class="option-symbol-summary">
+                      <strong>标的总结</strong>
+                      <span>${escapeHtml(item.symbol_summary || item.explanation || "期权结构暂无明显结论。")}</span>
                     </div>
+                    ${renderOptionAlerts(item.risk_alerts)}
+                    <div class="option-metrics">
+                      ${renderOptionMetric("现价", fmtPrice(item.underlying_price), "", "正股当前价，用来计算期权行权价距离。")}
+                      ${renderOptionMetric("风险分", fmtMaybeNumber(item.risk?.score, 0), item.risk?.label, formatScore(item.risk?.score, item.risk?.score_range, "prompt"))}
+                      ${renderOptionMetric("异动分", fmtMaybeNumber(item.anomaly?.score, 0), item.anomaly?.label, formatScore(item.anomaly?.score, item.anomaly?.score_range, "prompt"))}
+                      ${renderOptionMetric("预期波动", item.expected_move_pct === null || item.expected_move_pct === undefined ? "-" : `±${fmtPct(item.expected_move_pct)}`, "焦点到期", "用近月/焦点ATM IV按 sqrt(DTE/365) 近似估算。")}
+                      ${renderOptionMetric("OI PCR", fmtMaybeNumber(item.put_call_oi_ratio), "存量方向", "Put未平仓/Call未平仓；高值通常代表保护或看空仓位更重。")}
+                      ${renderOptionMetric("成交PCR", fmtMaybeNumber(item.put_call_volume_ratio), "当日方向", "Put成交/Call成交；和OI PCR背离时，代表当日资金方向与存量仓位不一致。")}
+                      ${renderOptionMetric("ATM IV", fmtIv(item.atm_iv), "波动定价", "焦点到期附近平值期权隐含波动率。")}
+                      ${renderOptionMetric("成交/OI", fmtMaybeNumber(item.volume_oi_ratio), "异动活跃度", "总成交量/总未平仓；越高说明当日新增交易相对存量越活跃。")}
+                      ${renderOptionMetric("25D偏斜", fmtMaybeNumber(item.skew_25d, 4), "尾部需求", "25Delta Put IV - Call IV；正值大说明下行保护更贵。")}
+                      ${renderOptionMetric("最大痛点", item.max_pain ? fmtPrice(item.max_pain.strike) : "-", item.max_pain?.distance_pct === null || item.max_pain?.distance_pct === undefined ? "" : `距现价 ${fmtPct(item.max_pain.distance_pct)}`, "按当前OI估算期权卖方理论赔付最小的结算价。")}
+                      ${renderOptionMetric("简化GEX", fmtMaybeNumber(item.net_gex, 0), item.net_gex < 0 ? "放大波动" : "偏钉扎", "用Gamma、OI和现价近似估算；负值偏波动放大，正值偏钉扎。")}
+                      ${renderOptionMetric("平均价差", item.liquidity?.avg_spread_pct === null || item.liquidity?.avg_spread_pct === undefined ? "-" : fmtPct(item.liquidity.avg_spread_pct), "流动性", "期权买卖价差/中间价，越高代表信号噪声和交易成本越大。")}
+                    </div>
+                    ${renderOptionSignals(item.signals)}
                     <p class="option-explanation">${escapeHtml(item.explanation || "")}</p>
+                    <details class="tech-detail option-unusual-detail">
+                      <summary>单合约异动</summary>
+                      ${renderUnusualContracts(item.unusual_contracts)}
+                    </details>
                     <div class="option-walls">
                       <div>
                         <h4>Call OI墙</h4>
